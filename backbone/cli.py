@@ -1,9 +1,11 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2020, Frappe and contributors
 # For license information, please see license.txt
+from pathlib import Path
+
 import click
 
 from backbone.hypervisor import Hypervisor, Shell
+from backbone.proxmox import ProxmoxManager
 from backbone.tests import run_tests
 
 
@@ -54,3 +56,40 @@ def ssh(command):
 @cli.command()
 def tests():
 	run_tests()
+
+
+@cli.group()
+def proxmox():
+	"""Manage Proxmox VMs"""
+
+
+@proxmox.command()
+@click.option("--node", prompt=True)
+@click.option("--bridge", prompt=True)
+@click.option("--cidr", prompt=True)
+@click.option("--count", type=int, default=1, show_default=True)
+@click.option("--private-key", default="~/.ssh/id_rsa", show_default=True)
+@click.option("--public-key", default="~/.ssh/id_rsa.pub", show_default=True)
+def provision(node, bridge, cidr, count, private_key, public_key):
+       """Interactively provision VMs on Proxmox"""
+       host = click.prompt("Proxmox Host")
+       token_id = click.prompt("API Token ID")
+       token_secret = click.prompt("API Token Secret", hide_input=True)
+       mgr = ProxmoxManager(host, token_id, token_secret)
+       machines = []
+       for i in range(count):
+               vmid = click.prompt(f"VM {i + 1} ID", type=int)
+               name = click.prompt(f"VM {i + 1} name")
+               ip = click.prompt(f"VM {i + 1} IP")
+               cores = click.prompt(
+                       f"VM {i + 1} cores", type=int, default=1, show_default=True
+               )
+               memory = click.prompt(
+                       f"VM {i + 1} memory (MB)", type=int, default=1024, show_default=True
+               )
+               machines.append({"vmid": vmid, "name": name, "cores": cores, "memory": memory, "ip": ip})
+       mgr.create_cluster(node=node, bridge=bridge, cidr=cidr, machines=machines)
+       from backbone.ansible import AnsibleProvisioner
+       playbook = str(Path(__file__).parent.joinpath("playbooks", "setup_ubuntu.yml"))
+       provisioner = AnsibleProvisioner(playbook, private_key)
+       provisioner.provision([m["ip"] for m in machines], public_key)

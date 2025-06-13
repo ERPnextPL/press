@@ -1,0 +1,13 @@
+---
+- name: Basic Ubuntu setup
+  hosts: all
+  become: yes
+  tasks:
+    - name: Update apt cache and install python3
+      apt:
+        name: python3
+        update_cache: yes
+    - name: Add authorized key for root
+      authorized_key:
+        user: root
+        key: "{{ pub_key }}"
