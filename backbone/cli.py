@@ -70,26 +70,31 @@ def proxmox():
 @click.option("--count", type=int, default=1, show_default=True)
 @click.option("--private-key", default="~/.ssh/id_rsa", show_default=True)
 @click.option("--public-key", default="~/.ssh/id_rsa.pub", show_default=True)
-def provision(node, bridge, cidr, count, private_key, public_key):
-       """Interactively provision VMs on Proxmox"""
-       host = click.prompt("Proxmox Host")
-       token_id = click.prompt("API Token ID")
-       token_secret = click.prompt("API Token Secret", hide_input=True)
-       mgr = ProxmoxManager(host, token_id, token_secret)
-       machines = []
-       for i in range(count):
-               vmid = click.prompt(f"VM {i + 1} ID", type=int)
-               name = click.prompt(f"VM {i + 1} name")
-               ip = click.prompt(f"VM {i + 1} IP")
-               cores = click.prompt(
-                       f"VM {i + 1} cores", type=int, default=1, show_default=True
-               )
-               memory = click.prompt(
-                       f"VM {i + 1} memory (MB)", type=int, default=1024, show_default=True
-               )
-               machines.append({"vmid": vmid, "name": name, "cores": cores, "memory": memory, "ip": ip})
-       mgr.create_cluster(node=node, bridge=bridge, cidr=cidr, machines=machines)
-       from backbone.ansible import AnsibleProvisioner
-       playbook = str(Path(__file__).parent.joinpath("playbooks", "setup_ubuntu.yml"))
-       provisioner = AnsibleProvisioner(playbook, private_key)
-       provisioner.provision([m["ip"] for m in machines], public_key)
+@click.option("--insecure", is_flag=True, help="Disable SSL certificate verification")
+@click.option("--skip-private-network", is_flag=True, help="Skip creating private network")
+def provision(node, bridge, cidr, count, private_key, public_key, insecure, skip_private_network):
+	"""Interactively provision VMs on Proxmox"""
+	host = click.prompt("Proxmox Host")
+	token_id = click.prompt("API Token ID")
+	token_secret = click.prompt("API Token Secret", hide_input=True)
+	mgr = ProxmoxManager(host, token_id, token_secret, verify_ssl=not insecure)
+	machines = []
+	for i in range(count):
+		vmid = click.prompt(f"VM {i + 1} ID", type=int)
+		name = click.prompt(f"VM {i + 1} name")
+		ip = click.prompt(f"VM {i + 1} IP")
+		cores = click.prompt(f"VM {i + 1} cores", type=int, default=1, show_default=True)
+		memory = click.prompt(f"VM {i + 1} memory (MB)", type=int, default=1024, show_default=True)
+		machines.append({"vmid": vmid, "name": name, "cores": cores, "memory": memory, "ip": ip})
+	mgr.create_cluster(
+		node=node,
+		bridge=bridge,
+		cidr=cidr,
+		machines=machines,
+		create_private_network=not skip_private_network,
+	)
+	from backbone.ansible import AnsibleProvisioner
+
+	playbook = str(Path(__file__).parent.joinpath("playbooks", "setup_ubuntu.yml"))
+	provisioner = AnsibleProvisioner(playbook, private_key)
+	provisioner.provision([m["ip"] for m in machines], public_key)
