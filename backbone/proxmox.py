@@ -23,7 +23,16 @@ class ProxmoxManager:
 		if resp.status_code >= 400:
 			raise Exception(f"Failed to create bridge: {resp.text}")
 
-	def create_vm(self, node: str, vmid: int, name: str, bridge: str, cores: int = 1, memory: int = 1024, storage: str = "local-lvm") -> None:
+	def create_vm(
+		self,
+		node: str,
+		vmid: int,
+		name: str,
+		bridge: str,
+		cores: int = 1,
+		memory: int = 1024,
+		storage: str = "local-lvm",
+	) -> None:
 		payload = {
 			"vmid": vmid,
 			"name": name,
@@ -39,7 +48,15 @@ class ProxmoxManager:
 		if resp.status_code >= 400:
 			raise Exception(f"Failed to create VM {name}: {resp.text}")
 
-	def create_cluster(self, node: str, bridge: str, cidr: str, machines: list[dict[str, any]]) -> None:
-		self.create_private_bridge(node, bridge, cidr)
+	def create_cluster(
+		self,
+		node: str,
+		bridge: str,
+		cidr: str,
+		machines: list[dict[str, any]],
+		create_private_network: bool = True,
+	) -> None:
+		if create_private_network:
+			self.create_private_bridge(node, bridge, cidr)
 		for machine in machines:
 			self.create_vm(node=node, bridge=bridge, **machine)

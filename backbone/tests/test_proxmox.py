@@ -27,6 +27,14 @@ class TestProxmoxManager(unittest.TestCase):
 		with self.assertRaisesRegex(Exception, "Failed to create VM"):
 			mgr.create_vm("node1", 101, "test", "vmbr0")
 
+	@patch.object(ProxmoxManager, "create_private_bridge")
+	@patch.object(ProxmoxManager, "create_vm")
+	def test_create_cluster_skip_private_network(self, create_vm, create_bridge):
+		mgr = ProxmoxManager("host", "id", "secret")
+		mgr.create_cluster("node1", "vmbr0", "10.0.0.0/24", [], create_private_network=False)
+		create_bridge.assert_not_called()
+
+
 class TestAnsibleProvisioner(unittest.TestCase):
 	@patch("backbone.ansible.subprocess.run")
 	def test_provision_fail(self, run):
