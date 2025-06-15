@@ -34,6 +34,14 @@ class TestProxmoxManager(unittest.TestCase):
 		mgr.create_cluster("node1", "vmbr0", "10.0.0.0/24", [], create_private_network=False)
 		create_bridge.assert_not_called()
 
+	@patch.object(ProxmoxManager, "create_private_bridge")
+	@patch.object(ProxmoxManager, "create_vm")
+	def test_create_cluster_ignores_ip_key(self, create_vm, create_bridge):
+		mgr = ProxmoxManager("host", "id", "secret")
+		machines = [{"vmid": 101, "name": "test", "cores": 2, "memory": 2048, "ip": "10.0.0.2"}]
+		mgr.create_cluster("node1", "vmbr0", "10.0.0.0/24", machines)
+		create_vm.assert_called_with(node="node1", bridge="vmbr0", vmid=101, name="test", cores=2, memory=2048)
+
 
 class TestAnsibleProvisioner(unittest.TestCase):
 	@patch("backbone.ansible.subprocess.run")
