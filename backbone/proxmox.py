@@ -59,4 +59,5 @@ class ProxmoxManager:
 		if create_private_network:
 			self.create_private_bridge(node, bridge, cidr)
 		for machine in machines:
-			self.create_vm(node=node, bridge=bridge, **machine)
+			vm_config = {k: v for k, v in machine.items() if k != "ip"}
+			self.create_vm(node=node, bridge=bridge, **vm_config)
