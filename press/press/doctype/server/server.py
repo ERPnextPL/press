@@ -635,7 +635,7 @@ class BaseServer(Document, TagHelpers):
 			self.reboot()
 
 	def guess_data_disk_mountpoint(self) -> str:
-		if not self.has_data_volume:
+		if not hasattr(self, "has_data_volume") or not self.has_data_volume:
 			return "/"
 
 		volumes = self.get_volume_mounts()
@@ -721,7 +721,7 @@ class BaseServer(Document, TagHelpers):
 			{
 				"document_type": self.doctype,
 				"document_name": self.name,
-				"team": self.team,
+				"team": self.team or "team@erpnext.com",
 				"plan_type": plan_type,
 				"plan": plan,
 			},
@@ -1239,9 +1239,27 @@ class BaseServer(Document, TagHelpers):
 			"bench": bench_info["name"],
 		}
 
+	def _get_dependency_version(self, candidate: str, dependency: str) -> str:
+		return frappe.get_value(
+			"Deploy Candidate Dependency",
+			{"parent": candidate, "dependency": dependency},
+			"version",
+		)
+
 	@frappe.whitelist()
 	def collect_arm_images(self) -> str:
 		"""Collect arm build images of all active benches on VM"""
+		# Need to disable all further deployments before collecting arm images.
+
+		def _parse_semantic_version(version_str: str) -> semantic_version.Version:
+			try:
+				return semantic_version.Version(version_str)
+			except ValueError:
+				return semantic_version.Version(f"{version_str}.0")
+
+		frappe.db.set_value("Server", self.name, "stop_deployments", 1)
+		frappe.db.commit()
+
 		benches = frappe.get_all(
 			"Bench",
 			{"server": self.name, "status": "Active"},
@@ -1252,12 +1270,14 @@ class BaseServer(Document, TagHelpers):
 			frappe.throw(f"No active benches found on <a href='/app/server/{self.name}'> Server")
 
 		for bench in benches:
-			version = frappe.get_value(
-				"Deploy Candidate Dependency",
-				{"parent": bench["candidate"], "dependency": "BENCH_VERSION"},
-				"version",
-			)
-			if semantic_version.Version(version) < semantic_version.Version("5.25.1"):
+			raw_bench_version = self._get_dependency_version(bench["candidate"], "BENCH_VERSION")
+			raw_python_version = self._get_dependency_version(bench["candidate"], "PYTHON_VERSION")
+			bench_version = _parse_semantic_version(raw_bench_version)
+			python_version = _parse_semantic_version(raw_python_version)
+
+			if python_version > semantic_version.Version(
+				"3.8.0"
+			) and bench_version < semantic_version.Version("5.25.1"):
 				frappe.db.set_value(
 					"Deploy Candidate Dependency",
 					{"parent": bench["candidate"], "dependency": "BENCH_VERSION"},
@@ -1994,11 +2014,6 @@ class Server(BaseServer):
 			ansible.run()
 		except Exception:
 			log_error("Exporters Install Exception", server=self.as_dict())
-
-	@classmethod
-	def get_all_prod(cls, **kwargs) -> list[str]:
-		"""Active prod servers."""
-		return frappe.get_all("Server", {"status": "Active"}, pluck="name", **kwargs)
 
 	@classmethod
 	def get_all_primary_prod(cls) -> list[str]:

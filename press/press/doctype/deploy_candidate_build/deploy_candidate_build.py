@@ -751,7 +751,7 @@ class DeployCandidateBuild(Document):
 
 		build_meta = {
 			"doctype": "Deploy Candidate Build",
-			"deploy_candidate": self.candidate,
+			"deploy_candidate": self.candidate.name,
 			"no_build": self.no_build,
 			"no_cache": self.no_cache,
 			"no_push": self.no_push,
@@ -1224,6 +1224,14 @@ def fail_and_redeploy(dn: str):
 	build: DeployCandidateBuild = frappe.get_doc("Deploy Candidate Build", dn)
 
 	return build.redeploy()
+
+
+@frappe.whitelist()
+def fail_remote_job(dn: str):
+	agent_job: "AgentJob" = frappe.get_doc(
+		"Agent Job", {"reference_doctype": "Deploy Candidate Build", "reference_name": dn}
+	)
+	agent_job.cancel_job()
 
 
 def is_build_job(job: Job) -> bool:

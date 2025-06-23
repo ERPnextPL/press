@@ -45,9 +45,15 @@ def _get_intel_mount_point(_: Literal["f", "m"]) -> str:
 
 
 def get_mount_point(server: str) -> str:
+	doctype = "Database Server" if server[0] == "m" else "Server"
+	provider = frappe.get_value(doctype, server, "provider")
+	if provider != "AWS EC2":
+		return _get_intel_mount_point("/")
+
 	platform, series = frappe.get_value("Virtual Machine", server, ["platform", "series"])
 	if platform == "arm64":
 		return _get_arm_mount_point(series)
+
 	return _get_intel_mount_point(series)
 
 
@@ -181,6 +187,12 @@ def archive(name):
 
 @frappe.whitelist()
 def new(server):
+	server_plan_platform = frappe.get_value("Server Plan", server["app_plan"], "platform")
+	cluster_has_arm_support = frappe.get_value("Cluster", server["cluster"], "has_arm_support")
+
+	if server_plan_platform == "arm64" and not cluster_has_arm_support:
+		frappe.throw(f"ARM Instances are currently unavailable in the {server['cluster']} region")
+
 	team = get_current_team(get_doc=True)
 	if not team.enabled:
 		frappe.throw("You cannot create a new server because your account is disabled")
@@ -355,7 +367,7 @@ def analytics(name, query, timezone, duration):
 		"innodb_bp_miss_percent": (
 			f"""
 avg by (instance) (
-        rate(mysql_global_status_innodb_buffer_pool_reads{{instance=~"{name}"}}[{timegrain}s])
+		rate(mysql_global_status_innodb_buffer_pool_reads{{instance=~"{name}"}}[{timegrain}s])
 		/
 		rate(mysql_global_status_innodb_buffer_pool_read_requests{{instance=~"{name}"}}[{timegrain}s])
 )
@@ -449,12 +461,22 @@ def options():
 	return {
 		"regions": regions,
 		"app_plans": plans("Server"),
-		"db_plans": plans("Database Server"),
+		"db_plans": plans("Database Server", platform="x86_64"),
 	}
 
 
 @frappe.whitelist()
-def plans(name, cluster=None, platform="x86_64"):
+def plans(name, cluster=None, platform=None):
+	# Removed default platform of x86_64;
+	# Still use x86_64 for new database servers
+	filters = {"server_type": name}
+
+	if cluster:
+		filters.update({"cluster": cluster})
+
+	if platform:
+		filters.update({"platform": platform})
+
 	return Plan.get_plans(
 		doctype="Server Plan",
 		fields=[
@@ -469,12 +491,7 @@ def plans(name, cluster=None, platform="x86_64"):
 			"instance_type",
 			"premium",
 		],
-		filters={"server_type": name, "platform": platform, "cluster": cluster}
-		if cluster
-		else {
-			"server_type": name,
-			"platform": platform,
-		},
+		filters=filters,
 	)
 
 
