@@ -18,7 +18,7 @@ from frappe.utils import (
 	flt,
 	get_datetime,
 )
-from frappe.utils.caching import redis_cache, request_cache
+from frappe.utils.caching import redis_cache
 from frappe.utils.password import get_decrypted_password
 from pytz import timezone as pytz_timezone
 
@@ -119,8 +119,10 @@ class StackedGroupByChart:
 		self.setup_search_aggs()
 
 	def setup_search_filters(self):
-		es = Elasticsearch(self.url, basic_auth=("frappe", self.password))
-		self.start, self.end = get_rounded_boundaries(self.timespan, self.timegrain, self.timezone)
+		es = Elasticsearch(self.url, basic_auth=("frappe", self.password), request_timeout=120)
+		self.start, self.end = get_rounded_boundaries(
+			self.timespan, self.timegrain, self.timezone
+		)  # we pass timezone to ES query in get_histogram_chart
 		self.search = (
 			Search(using=es, index="filebeat-*")
 			.filter(
@@ -220,7 +222,7 @@ class StackedGroupByChart:
 	):
 		path_data = {
 			"path": path_bucket.key,
-			"values": [0] * len(labels),
+			"values": [None] * len(labels),
 			"stack": "path",
 		}
 		hist_bucket: HistBucket
@@ -582,7 +584,7 @@ def rounded_time(dt=None, round_to=60):
 	return dt + timedelta(0, rounding - seconds, -dt.microsecond)
 
 
-@request_cache
+@redis_cache(ttl=10 * 60)
 def get_rounded_boundaries(timespan: int, timegrain: int, timezone: str = "UTC"):
 	"""
 	Round the start and end time to the nearest interval, because Elasticsearch does this

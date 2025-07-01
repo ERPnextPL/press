@@ -25,6 +25,7 @@ from press.agent import Agent
 from press.api.client import dashboard_whitelist
 from press.exceptions import VolumeResizeLimitError
 from press.overrides import get_permission_query_conditions_for_doctype
+from press.press.doctype.ansible_console.ansible_console import AnsibleAdHoc
 from press.press.doctype.resource_tag.tag_helpers import TagHelpers
 from press.runner import Ansible
 from press.telegram_utils import Telegram
@@ -34,7 +35,10 @@ if typing.TYPE_CHECKING:
 	from press.infrastructure.doctype.arm_build_record.arm_build_record import ARMBuildRecord
 	from press.press.doctype.ansible_play.ansible_play import AnsiblePlay
 	from press.press.doctype.bench.bench import Bench
+	from press.press.doctype.database_server.database_server import DatabaseServer
+	from press.press.doctype.mariadb_variable.mariadb_variable import MariaDBVariable
 	from press.press.doctype.release_group.release_group import ReleaseGroup
+	from press.press.doctype.server_mount.server_mount import ServerMount
 	from press.press.doctype.virtual_machine.virtual_machine import VirtualMachine
 
 from typing import Literal, TypedDict
@@ -1297,8 +1301,7 @@ class BaseServer(Document, TagHelpers):
 
 	@frappe.whitelist()
 	def start_active_benches(self):
-		arm_build_record: ARMBuildRecord = frappe.get_last_doc("ARM Build Record", {"server": self.name})
-		benches = [image.bench for image in arm_build_record.arm_images]
+		benches = frappe.get_all("Bench", {"server": self.name, "status": "Active"}, pluck="name")
 		frappe.enqueue_doc(self.doctype, self.name, "_start_active_benches", benches=benches)
 
 	def _start_active_benches(self, benches: list[str]):
@@ -1539,6 +1542,32 @@ node_filesystem_avail_bytes{{instance="{self.name}", mountpoint="{mountpoint}"}}
 		except Exception:
 			log_error("Sever File Copy Exception", server=self.as_dict())
 
+	@frappe.whitelist()
+	def set_additional_config(self: Server | DatabaseServer):
+		"""
+		Corresponds to Set additional config step in Create Server Press Job
+		"""
+		if self.doctype == "Database Server":
+			default_variables = frappe.get_all("MariaDB Variable", {"set_on_new_servers": 1}, pluck="name")
+			for var_name in default_variables:
+				var: MariaDBVariable = frappe.get_doc("MariaDB Variable", var_name)
+				var.set_on_server(self)
+
+		self.set_swappiness()
+		self.add_glass_file()
+		self.install_filebeat()
+
+		if self.doctype == "Server":
+			self.setup_mysqldump()
+			self.install_earlyoom()
+
+		if self.doctype == "Database Server":
+			self.adjust_memory_config()
+			self.setup_logrotate()
+
+		self.validate_mounts()
+		self.save(ignore_permissions=True)
+
 
 class Server(BaseServer):
 	# begin: auto-generated types
@@ -1753,6 +1782,10 @@ class Server(BaseServer):
 	def add_upstream_to_proxy(self):
 		agent = Agent(self.proxy_server, server_type="Proxy Server")
 		agent.new_server(self.name)
+
+	def ansible_run(self, command: str) -> dict[str, str]:
+		inventory = f"{self.ip},"
+		return AnsibleAdHoc(sources=inventory).run(command, self.name)[0]
 
 	def _setup_server(self):
 		agent_password = self.get_password("agent_password")
