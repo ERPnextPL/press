@@ -69,6 +69,9 @@ Additionally, customers lacked full control over their servers—no SSH access, 
 
 To self host or to setup Press locally follow the steps in the [Local Development Environment Setup Guide](https://docs.frappe.io/cloud/local-fc-setup) or [this YouTube video](https://www.youtube.com/watch?v=Xb9QHnUrIEk)
 
+Press uses `/tmp/ansible` on remote hosts for Ansible's temporary files.
+Ensure this directory exists and is writable by all remote users.
+
 ## Learn and connect
 
 - [Telegram Public Group](https://t.me/frappecloud)

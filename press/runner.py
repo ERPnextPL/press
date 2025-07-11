@@ -166,6 +166,7 @@ class Ansible:
 			connection="ssh",
 			# This is the only way to pass variables that preserves newlines
 			extra_vars=[f"{cstr(key)}='{cstr(value)}'" for key, value in self.variables.items()],
+			remote_tmp="/tmp/ansible",
 			remote_user=user,
 			start_at_task=None,
 			syntax=False,
