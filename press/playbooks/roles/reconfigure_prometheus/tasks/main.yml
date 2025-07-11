@@ -34,15 +34,21 @@
     mode: 0600
   loop: "{{ log_servers }}"
 
-- name: Configure Prometheus
+- name: Copy prometheus.yml as root
   become: yes
-  become_user: frappe
   template:
     src: ../../prometheus/templates/prometheus.yml
     dest: /home/frappe/prometheus/prometheus.yml
     force: true
     mode: 0600
     validate: "/home/frappe/prometheus/promtool check config %s"
+
+- name: Set ownership of prometheus.yml to frappe
+  become: yes
+  file:
+    path: /home/frappe/prometheus/prometheus.yml
+    owner: frappe
+    group: frappe
 
 - name: Reload Prometheus Service
   systemd:
