@@ -131,6 +131,7 @@ class AnsibleAdHoc:
 			check=False,
 			connection="ssh",
 			extra_vars=[],
+			remote_tmp="/tmp/ansible",
 			remote_user="root",
 			start_at_task=None,
 			syntax=False,
