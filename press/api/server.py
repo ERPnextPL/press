@@ -412,23 +412,30 @@ def prometheus_query(query, function, timezone, timespan, timegrain):
 		"step": f"{timegrain}s",
 	}
 
-	response = requests.get(url, params=query, auth=("frappe", str(password))).json()
+	response = requests.get(url, params=query, auth=("frappe", str(password)))
+
+	if response.status_code != 200:
+		frappe.throw(f"Failed to query Prometheus: {response.text}")
+	try:
+		data = response.json()
+	except Exception as e:
+		frappe.throw(f"Invalid JSON from Prometheus: {response.text}")
 
 	datasets = []
 	labels = []
 
-	if not response["data"]["result"]:
+	if not data["data"]["result"]:
 		return {"datasets": datasets, "labels": labels}
 
 	timegrain_delta = timedelta(seconds=timegrain)
 	labels = [(start + i * timegrain_delta).timestamp() for i in range((end - start) // timegrain_delta + 1)]
 
-	for index in range(len(response["data"]["result"])):
+	for index in range(len(data["data"]["result"])):
 		dataset = {
-			"name": function(response["data"]["result"][index]["metric"]),
+			"name": function(data["data"]["result"][index]["metric"]),
 			"values": [None] * len(labels),  # Initialize with None
 		}
-		for label, value in response["data"]["result"][index]["values"]:
+		for label, value in data["data"]["result"][index]["values"]:
 			dataset["values"][labels.index(label)] = flt(value, 2)
 		datasets.append(dataset)
 
