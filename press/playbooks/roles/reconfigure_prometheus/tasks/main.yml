@@ -51,6 +51,7 @@
     group: frappe
 
 - name: Reload Prometheus Service
+  become: yes
   systemd:
     name: prometheus
     state: reloaded
