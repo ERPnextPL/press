@@ -1951,6 +1951,7 @@ def get_upload_link(file, parts=1):
 	expiration = frappe.db.get_single_value("Press Settings", "remote_link_expiry") or 3600
 	object_name = get_remote_key(file)
 	parts = int(parts)
+	default_region = frappe.db.get_single_value("Press Settings", "backup_region")
 
 	s3_client = client(
 		"s3",
@@ -1958,7 +1959,7 @@ def get_upload_link(file, parts=1):
 		aws_secret_access_key=get_decrypted_password(
 			"Press Settings", "Press Settings", "remote_secret_access_key"
 		),
-		region_name="ap-south-1",
+		region_name=default_region,
 	)
 	try:
 		# The response contains the presigned URL and required fields
