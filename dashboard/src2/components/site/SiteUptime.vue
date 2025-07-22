@@ -8,21 +8,22 @@
 	<div v-else class="mx-4 mt-8" v-for="type in uptimeTypes" :key="type.key">
 		<div class="flex h-10 justify-between">
 			<div
-				v-for="d in data"
-				:key="d.date"
+				v-for="(d, i) in data"
+				:key="d.date || i"
 				class="w-1.5 rounded"
 				:class="[
+					isNewDay(i) ? 'border-l border-gray-300' : '',
 					d[type.key] === undefined
-							? 'bg-white'
-							: d[type.key] === 1
+						? 'bg-white'
+						: d[type.key] === 1
 							? 'bg-[#84cc16]'
-							: d[type.key] >= 0.90
-							? 'bg-[#a3e635]'
-							: d[type.key] === 0 || d[type.key] < 0.3
-							? 'bg-[#ef4444]'
-							: d[type.key] >= 0.3 && d[type.key] <= 0.6
-							? 'bg-[#f59e0b]'
-							: 'bg-[#fcd34d]',
+							: d[type.key] >= 0.9
+								? 'bg-[#a3e635]'
+								: d[type.key] === 0 || d[type.key] < 0.3
+									? 'bg-[#ef4444]'
+									: d[type.key] >= 0.3 && d[type.key] <= 0.6
+										? 'bg-[#f59e0b]'
+										: 'bg-[#fcd34d]',
 				]"
 				:title="
 					d[type.key]
@@ -58,12 +59,21 @@ export default {
 			const average = ((total / i) * 100).toFixed(2);
 
 			return !isNaN(average) ? `Average: ${average}%` : '';
-		}
+		},
 	},
 	methods: {
 		formatDate(date) {
 			return DateTime.fromSQL(date).toLocaleString(DateTime.DATETIME_FULL);
-		}
-	}
+		},
+		isNewDay(index) {
+			if (index === 0) return false;
+			const prev = this.data[index - 1]?.date;
+			const curr = this.data[index]?.date;
+			if (!prev || !curr) return false;
+			const prevDay = DateTime.fromSQL(prev);
+			const currDay = DateTime.fromSQL(curr);
+			return !prevDay.hasSame(currDay, 'day');
+		},
+	},
 };
 </script>
