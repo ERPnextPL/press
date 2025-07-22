@@ -16,7 +16,7 @@
 						d[type.key] === undefined
 							? 'bg-white'
 							: d[type.key] === 1
-							? 'bg-emerald-500'
+							? 'bg-green-700'
 							: d[type.key] >= 0.95
 							? 'bg-green-500'
 							: d[type.key] === 0 || d[type.key] < 0.3
