@@ -29,7 +29,7 @@
 				/>
 			</AnalyticsCard>
 
-			<AnalyticsCard title="Uptime">
+			<AnalyticsCard title="Uptime" :subtitle="uptimeSubtitle">
 				<SiteUptime
 					:data="$resources.analytics?.data?.uptime"
 					:loading="$resources.analytics.loading"
@@ -461,6 +461,20 @@ export default {
 			return {
 				datasets: [requestCount.map((d) => [+new Date(d.date), d.value])],
 			};
+		},
+		uptimeSubtitle() {
+			const uptime = this.$resources.analytics.data?.uptime;
+			if (!uptime) return '';
+
+			let total = 0;
+			let i = 0;
+			for (; i < uptime.length; i++) {
+				if (typeof uptime[i].value !== 'number') break;
+				total += uptime[i].value;
+			}
+			const average = ((total / i) * 100).toFixed(2);
+
+			return !isNaN(average) ? `Average: ${average}%` : '';
 		},
 		requestCountByPathData() {
 			let requestCountByPath =
