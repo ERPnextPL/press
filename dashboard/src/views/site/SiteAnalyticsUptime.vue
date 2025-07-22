@@ -16,10 +16,14 @@
 						d[type.key] === undefined
 							? 'bg-white'
 							: d[type.key] === 1
-							? 'bg-green-500'
-							: d[type.key] === 0
-							? 'bg-red-500'
-							: 'bg-yellow-500'
+								? 'bg-emerald-500'
+								: d[type.key] >= 0.95
+									? 'bg-green-500'
+									: d[type.key] === 0 || d[type.key] < 0.3
+										? 'bg-red-500'
+										: d[type.key] >= 0.3 && d[type.key] <= 0.6
+											? 'bg-orange-500'
+											: 'bg-yellow-500',
 					]"
 					:title="
 						d[type.key]
@@ -55,12 +59,12 @@ export default {
 			const average = ((total / i) * 100).toFixed(2);
 
 			return !isNaN(average) ? `Average: ${average}%` : '';
-		}
+		},
 	},
 	methods: {
 		formatDate(date) {
 			return DateTime.fromSQL(date).toLocaleString(DateTime.DATETIME_FULL);
-		}
-	}
+		},
+	},
 };
 </script>
