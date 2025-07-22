@@ -15,13 +15,13 @@
 					d[type.key] === undefined
 							? 'bg-white'
 							: d[type.key] === 1
-							? 'bg-green-700'
-							: d[type.key] >= 0.95
 							? 'bg-green-500'
+							: d[type.key] >= 0.90
+							? 'bg-lime-500'
 							: d[type.key] === 0 || d[type.key] < 0.3
 							? 'bg-red-500'
 							: d[type.key] >= 0.3 && d[type.key] <= 0.6
-							? 'bg-orange-500'
+							? 'bg-orange-400'
 							: 'bg-yellow-500',
 				]"
 				:title="
