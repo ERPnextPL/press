@@ -122,6 +122,29 @@ let router = createRouter({
 			component: () => import('./pages/PartnerNewPayout.vue'),
 		},
 		{
+			name: 'PartnerLeadDetails',
+			path: '/partner-lead/:leadId',
+			component: () => import('./pages/PartnerLeadDetails.vue'),
+			children: [
+				{
+					name: 'LeadOverview',
+					path: '',
+					component: () =>
+						import('./components/partners/PartnerLeadOverview.vue'),
+				},
+				{
+					name: 'LeadDealDetails',
+					path: 'deal-info',
+					component: () => import('./components/partners/LeadDealDetails.vue'),
+				},
+				{
+					name: 'LeadFollowUp',
+					path: 'follow-up',
+					component: () => import('./components/partners/LeadFollowup.vue'),
+				},
+			],
+		},
+		{
 			name: 'Billing',
 			path: '/billing',
 			component: () => import('./pages/Billing.vue'),
@@ -221,6 +244,11 @@ let router = createRouter({
 					component: () => import('./components/partners/PartnerCustomers.vue'),
 				},
 				{
+					name: 'PartnerLeads',
+					path: 'partner-leads',
+					component: () => import('./components/partners/PartnerLeads.vue'),
+				},
+				{
 					name: 'PartnerCertificates',
 					path: 'certificates',
 					component: () =>
@@ -233,6 +261,12 @@ let router = createRouter({
 						import('./components/partners/PartnerApprovalRequests.vue'),
 				},
 				{
+					name: 'PartnerContributions',
+					path: 'contributions',
+					component: () =>
+						import('./components/partners/PartnerContributionList.vue'),
+				},
+				{
 					name: 'LocalPaymentSetup',
 					path: 'local-payment-setup',
 					component: () =>
@@ -242,6 +276,11 @@ let router = createRouter({
 					name: 'PartnerPayout',
 					path: 'payment-payout',
 					component: () => import('./components/partners/PartnerPayout.vue'),
+				},
+				{
+					name: 'PartnerDashboard',
+					path: 'partner-dashboard',
+					component: () => import('./components/partners/PartnerDashboard.vue'),
 				},
 			],
 		},
@@ -260,6 +299,11 @@ let router = createRouter({
 					name: 'CertificateList',
 					path: 'certificate-list',
 					component: () => import('./pages/PartnerAdminCertificates.vue'),
+				},
+				{
+					name: 'PartnerLeadList',
+					path: 'partner-lead-list',
+					component: () => import('./components/partners/PartnerLeads.vue'),
 				},
 			],
 		},
@@ -322,6 +366,16 @@ let router = createRouter({
 				import('./pages/devtools/database/DatabaseSQLPlayground.vue'),
 		},
 		{
+			path: '/enable-bench-groups',
+			name: 'Enable Bench Groups',
+			component: () => import('./pages/EnableBenchGroups.vue'),
+		},
+		{
+			path: '/enable-servers',
+			name: 'Enable Servers',
+			component: () => import('./pages/EnableServers.vue'),
+		},
+		{
 			path: '/database-analyzer',
 			name: 'DB Analyzer',
 			component: () => import('./pages/devtools/database/DatabaseAnalyzer.vue'),
@@ -335,6 +389,18 @@ let router = createRouter({
 			path: '/log-browser/:mode?/:docName?/:logId?',
 			name: 'Log Browser',
 			component: () => import('./pages/devtools/log-browser/LogBrowser.vue'),
+			props: true,
+		},
+		{
+			path: '/backups/sites',
+			name: 'Site Backups',
+			component: () => import('./pages/backups/SiteBackups.vue'),
+			props: true,
+		},
+		{
+			path: '/backups/snapshots',
+			name: 'Snapshots',
+			component: () => import('./pages/backups/ServerSnapshots.vue'),
 			props: true,
 		},
 		...generateRoutes(),
@@ -388,12 +454,34 @@ router.beforeEach(async (to, from, next) => {
 			return;
 		}
 
-		if (
-			!onboardingComplete &&
-			(to.name.startsWith('Release Group') || to.name.startsWith('Server'))
-		) {
-			next({ name: onboardingRoute });
-			return;
+		if (to.name.startsWith('Release Group')) {
+			if (!$team.doc.benches_enabled)
+				try {
+					await $team.setValue.submit({ benches_enabled: 1 });
+				} catch (e) {
+					console.warn('Auto-enable benches failed:', e);
+				}
+			if (!onboardingComplete) {
+				next({ name: 'Enable Bench Groups' });
+				return;
+			}
+		} else if (to.name === 'Enable Bench Groups' && onboardingComplete) {
+			next({ name: 'Release Group List' });
+		}
+
+		if (to.name.startsWith('Server')) {
+			if (!$team.doc.servers_enabled)
+				try {
+					await $team.setValue.submit({ servers_enabled: 1 });
+				} catch (e) {
+					console.warn('Auto-enable servers failed:', e);
+				}
+			if (!onboardingComplete) {
+				next({ name: 'Enable Servers' });
+				return;
+			}
+		} else if (to.name === 'Enable Server' && onboardingComplete) {
+			next({ name: 'Server List' });
 		}
 
 		if (goingToLoginPage) {

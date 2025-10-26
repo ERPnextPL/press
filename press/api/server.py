@@ -13,9 +13,10 @@ from frappe.utils import convert_utc_to_timezone, flt
 from frappe.utils.caching import redis_cache
 from frappe.utils.password import get_decrypted_password
 
-from press.api.analytics import get_rounded_boundaries
+from press.api.analytics import TIMESPAN_TIMEGRAIN_MAP, get_rounded_boundaries
 from press.api.bench import all as all_benches
 from press.api.site import protected
+from press.exceptions import MonitorServerDown
 from press.press.doctype.site_plan.plan import Plan
 from press.press.doctype.team.team import get_child_team_members
 from press.utils import get_current_team
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 	from press.press.doctype.cluster.cluster import Cluster
 	from press.press.doctype.database_server.database_server import DatabaseServer
 	from press.press.doctype.server.server import Server
+	from press.press.doctype.server_plan.server_plan import ServerPlan
 
 
 def poly_get_doc(doctypes, name):
@@ -33,11 +35,18 @@ def poly_get_doc(doctypes, name):
 	return frappe.get_doc(doctypes[-1], name)
 
 
-def get_mount_point(server: str) -> str:
+def get_mount_point(server: str, server_type=None) -> str:
 	"""Guess mount point from server"""
-	server: Server | DatabaseServer = frappe.get_doc(
-		"Database Server" if server[0] == "m" else "Server", server
-	)
+	if server_type is None:
+		server_type = "Database Server" if server[0] == "m" else "Server"
+
+	elif server_type == "Application Server":
+		server_type = "Server"
+
+	elif server_type == "Replication Server":
+		server_type = "Database Server"
+
+	server: Server | DatabaseServer = frappe.get_doc(server_type, server)
 	if server.provider != "AWS EC2":
 		return "/"
 
@@ -173,6 +182,13 @@ def archive(name):
 
 
 @frappe.whitelist()
+@protected(["Server"])
+def get_reclaimable_size(name):
+	server: Server = frappe.get_doc("Server", name)
+	return server.agent.get("server/reclaimable-size")
+
+
+@frappe.whitelist()
 def new(server):
 	server_plan_platform = frappe.get_value("Server Plan", server["app_plan"], "platform")
 	cluster_has_arm_support = frappe.get_value("Cluster", server["cluster"], "has_arm_support")
@@ -187,7 +203,12 @@ def new(server):
 
 	cluster: Cluster = frappe.get_doc("Cluster", server["cluster"])
 
-	db_plan = frappe.get_doc("Server Plan", server["db_plan"])
+	db_plan: ServerPlan = frappe.get_doc("Server Plan", server["db_plan"])
+	if not cluster.check_machine_availability(db_plan.instance_type):
+		frappe.throw(
+			f"No machines of {db_plan.instance_type} are currently available in the {cluster.name} region"
+		)
+
 	db_server, job = cluster.create_server(
 		"Database Server",
 		server["title"],
@@ -206,7 +227,12 @@ def new(server):
 	cluster.database_server = db_server.name
 	cluster.proxy_server = proxy_server.name
 
-	app_plan = frappe.get_doc("Server Plan", server["app_plan"])
+	app_plan: ServerPlan = frappe.get_doc("Server Plan", server["app_plan"])
+	if not cluster.check_machine_availability(app_plan.instance_type):
+		frappe.throw(
+			f"No machines of {app_plan.instance_type} are currently available in the {cluster.name} region"
+		)
+
 	app_server, job = cluster.create_server(
 		"Server", server["title"], app_plan, team=team.name, auto_increase_storage=auto_increase_storage
 	)
@@ -309,8 +335,8 @@ def calculate_swap(name):
 @frappe.whitelist()
 @protected(["Server", "Database Server"])
 @redis_cache(ttl=10 * 60)
-def analytics(name, query, timezone, duration):
-	mount_point = get_mount_point(name)
+def analytics(name, query, timezone, duration, server_type=None):
+	mount_point = get_mount_point(name, server_type)
 	timespan, timegrain = get_timespan_timegrain(duration)
 
 	query_map = {
@@ -393,6 +419,17 @@ def get_request_by_site(name, query, timezone, duration):
 @frappe.whitelist()
 @protected(["Server", "Database Server"])
 @redis_cache(ttl=10 * 60)
+def get_background_job_by_site(name, query, timezone, duration):
+	from press.api.analytics import ResourceType, get_background_job_by_
+
+	timespan, timegrain = get_timespan_timegrain(duration)
+
+	return get_background_job_by_(name, query, timezone, timespan, timegrain, ResourceType.SERVER)
+
+
+@frappe.whitelist()
+@protected(["Server", "Database Server"])
+@redis_cache(ttl=10 * 60)
 def get_slow_logs_by_site(name, query, timezone, duration, normalize=False):
 	from press.api.analytics import ResourceType, get_slow_logs
 
@@ -421,14 +458,10 @@ def prometheus_query(query, function, timezone, timespan, timegrain):
 		"step": f"{timegrain}s",
 	}
 
-	response = requests.get(url, params=query, auth=("frappe", str(password)))
-
-	if response.status_code != 200:
-		frappe.throw(f"Failed to query Prometheus: {response.text}")
 	try:
-		data = response.json()
-	except Exception as e:
-		frappe.throw(f"Invalid JSON from Prometheus: {response.text}")
+		response = requests.get(url, params=query, auth=("frappe", str(password))).json()
+	except requests.exceptions.RequestException:
+		frappe.throw("Unable to connect to monitor server", MonitorServerDown)
 
 	datasets = []
 	labels = []
@@ -471,11 +504,18 @@ def options():
 		["price_inr", "price_usd"],
 		as_dict=True,
 	)
+	snapshot_plan = frappe.db.get_value(
+		"Server Snapshot Plan",
+		{"enabled": 1},
+		["price_inr", "price_usd"],
+		as_dict=True,
+	)
 	return {
 		"regions": regions,
 		"app_plans": plans("Server"),
 		"db_plans": plans("Database Server"),
 		"storage_plan": storage_plan,
+		"snapshot_plan": snapshot_plan,
 	}
 
 
@@ -614,12 +654,4 @@ def rename(name, title):
 
 
 def get_timespan_timegrain(duration: str) -> tuple[int, int]:
-	timespan, timegrain = {
-		"1 Hour": (60 * 60, 2 * 60),
-		"6 Hour": (6 * 60 * 60, 5 * 60),
-		"24 Hour": (24 * 60 * 60, 30 * 60),
-		"7 Days": (7 * 24 * 60 * 60, 2 * 30 * 60),
-		"15 Days": (15 * 24 * 60 * 60, 3 * 30 * 60),
-	}[duration]
-
-	return timespan, timegrain
+	return TIMESPAN_TIMEGRAIN_MAP[duration]

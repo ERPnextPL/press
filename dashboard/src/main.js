@@ -105,12 +105,15 @@ getInitialData().then(() => {
 					'ValidationError',
 					'PermissionError',
 					'SecurityException',
-					'AAAARecordExists',
 					'AuthenticationError',
 					'RateLimitExceededError',
 					'InsufficientSpaceOnServer',
+					'AAAARecordExists',
+					'ConflictingCAARecord',
 					'ConflictingDNSRecord',
+					'DomainProxied',
 					'MultipleARecords',
+					'MultipleCNAMERecords',
 				];
 				const error = hint.originalException;
 
@@ -142,6 +145,12 @@ getInitialData().then(() => {
 			disable_session_recording: true,
 			session_recording: {
 				maskAllInputs: true,
+				maskInputFn: (text, element) => {
+					if (element?.dataset['record'] === 'true') {
+						return text
+					}
+					return '*'.repeat(text.trim().length)
+				},
 			},
 		});
 	} else {

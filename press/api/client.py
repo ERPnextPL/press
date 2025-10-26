@@ -14,6 +14,8 @@ from frappe.model.base_document import get_controller
 from frappe.utils import cstr
 from pypika.queries import QueryBuilder
 
+from press.access import dashboard_access_rules
+from press.access.support_access import has_support_access
 from press.exceptions import TeamHeaderNotInRequestError
 from press.utils import has_role
 
@@ -26,6 +28,7 @@ ALLOWED_DOCTYPES = [
 	"Site Domain",
 	"Site Backup",
 	"Site Activity",
+	"Server Activity",
 	"Site Config",
 	"Site Plan",
 	"Site Update",
@@ -81,12 +84,13 @@ ALLOWED_DOCTYPES = [
 	"Partner Payment Payout",
 	"Deploy Candidate Build",
 	"Account Request",
-]
-
-ALLOWED_DOCTYPES_FOR_SUPPORT = [
-	"Site",
-	"Bench",
-	"Release Group",
+	"Server Snapshot",
+	"Server Snapshot Recovery",
+	"Partner Lead",
+	"Partner Lead Type",
+	"Lead Followup",
+	"Partner Consent",
+	"Support Access",
 ]
 
 whitelisted_methods = set()
@@ -165,7 +169,7 @@ def get_list_query(
 	limit: int,
 	order_by: str | None,
 ):
-	from press.press.doctype.press_role.press_role import check_role_permissions
+	from press.press.doctype.press_role.press_role import LINKED_DOCTYPE_PERMISSIONS, check_role_permissions
 
 	query = frappe.qb.get_query(
 		doctype,
@@ -190,10 +194,16 @@ def get_list_query(
 		PressRolePermission = frappe.qb.DocType("Press Role Permission")
 		QueriedDocType = frappe.qb.DocType(doctype)
 
-		field = doctype.lower().replace(" ", "_")
+		if doctype in LINKED_DOCTYPE_PERMISSIONS:
+			field = LINKED_DOCTYPE_PERMISSIONS[doctype].get("parent_doctype", "").lower().replace(" ", "_")
+			doctype_field = QueriedDocType[LINKED_DOCTYPE_PERMISSIONS[doctype].get("parent_field")]
+		else:
+			field = doctype.lower().replace(" ", "_")
+			doctype_field = QueriedDocType.name
+
 		query = (
 			query.join(PressRolePermission)
-			.on(PressRolePermission[field] == QueriedDocType.name & PressRolePermission.role.isin(roles))
+			.on(PressRolePermission[field] == doctype_field & PressRolePermission.role.isin(roles))
 			.distinct()
 		)
 
@@ -214,7 +224,7 @@ def get(doctype, name):
 		raise
 
 	if (
-		not (frappe.local.system_user() or has_role("Press Support Agent"))
+		not (frappe.local.system_user() or has_support_access(doctype, name))
 		and frappe.get_meta(doctype).has_field("team")
 		and doc.team != frappe.local.team().name
 	):
@@ -235,7 +245,7 @@ def get(doctype, name):
 		if isinstance(result, dict):
 			_doc.update(result)
 
-	return _doc
+	return dashboard_access_rules(_doc)
 
 
 @frappe.whitelist(methods=["POST", "PUT"])
@@ -361,9 +371,6 @@ def check_document_access(doctype: str, name: str):
 	if frappe.local.system_user():
 		return
 
-	if has_role("Press Support Agent") and doctype in ALLOWED_DOCTYPES_FOR_SUPPORT:
-		return
-
 	team = ""
 	meta = frappe.get_meta(doctype)
 	if meta.has_field("team"):
@@ -378,6 +385,9 @@ def check_document_access(doctype: str, name: str):
 		return
 
 	if team == frappe.local.team().name:
+		return
+
+	if has_support_access(doctype, name):
 		return
 
 	raise_not_permitted()

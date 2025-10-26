@@ -11,6 +11,7 @@ import Package from '~icons/lucide/package';
 import Boxes from '~icons/lucide/boxes';
 import Server from '~icons/lucide/server';
 import WalletCards from '~icons/lucide/wallet-cards';
+import Key from '~icons/lucide/key';
 import Settings from '~icons/lucide/settings';
 import App from '~icons/lucide/layout-grid';
 import DatabaseZap from '~icons/lucide/database-zap';
@@ -20,6 +21,8 @@ import Globe from '~icons/lucide/globe';
 import Shield from '~icons/lucide/shield';
 import Notification from '~icons/lucide/inbox';
 import Code from '~icons/lucide/code';
+import Archive from '~icons/lucide/archive';
+import Camera from '~icons/lucide/camera';
 import FileSearch from '~icons/lucide/file-search';
 import { unreadNotificationsCount } from '../data/notifications';
 
@@ -32,8 +35,6 @@ export default {
 			const routeName = this.$route?.name || '';
 			const onboardingComplete = this.$team.doc.onboarding.complete;
 			const isSaasUser = this.$team.doc.is_saas_user;
-			const benchGroupsEnabled = this.$team.doc.benches_enabled;
-			const serversEnabled = this.$team.doc.servers_enabled;
 			const enforce2FA = Boolean(
 				!this.$team.doc.is_desk_user &&
 					this.$team.doc.enforce_2fa &&
@@ -89,7 +90,7 @@ export default {
 				{
 					name: 'Bench Groups',
 					icon: () => h(Boxes),
-					route: '/groups',
+					route: onboardingComplete ? '/groups' : '/enable-bench-groups',
 					isActive:
 						[
 							'Release Group List',
@@ -98,28 +99,41 @@ export default {
 							'Release Group New Site',
 							'Deploy Candidate',
 						].includes(routeName) ||
-						routeName.startsWith('Release Group Detail'),
-					condition: onboardingComplete && !isSaasUser && benchGroupsEnabled,
+						routeName.startsWith('Release Group Detail') ||
+						routeName === 'Enable Bench Groups',
 					disabled: enforce2FA,
 				},
 				{
 					name: 'Servers',
 					icon: () => h(Server),
-					route: '/servers',
+					route: onboardingComplete ? '/servers' : '/enable-servers',
 					isActive:
 						['New Server'].includes(routeName) ||
-						routeName.startsWith('Server'),
-					condition: onboardingComplete && !isSaasUser && serversEnabled,
+						routeName.startsWith('Server') ||
+						routeName === 'Enable Servers',
 					disabled: enforce2FA,
 				},
 				{
-					name: 'Marketplace',
-					icon: () => h(App),
-					route: '/apps',
-					isActive: routeName.startsWith('Marketplace'),
-					condition:
-						this.$team.doc?.is_desk_user ||
-						(!!this.$team.doc.is_developer && this.$session.hasAppsAccess),
+					name: 'Backups',
+					icon: () => h(Archive),
+					route: '/backups',
+					condition: onboardingComplete && !isSaasUser,
+					disabled: enforce2FA,
+					children: [
+						{
+							name: 'Site Backups',
+							icon: () => h(PanelTopInactive),
+							route: '/backups/sites',
+							isActive: routeName === 'Site Backups',
+						},
+						{
+							name: 'Snapshots',
+							icon: () => h(Camera),
+							route: '/backups/snapshots',
+							isActive: routeName === 'Snapshots',
+						},
+					].filter((item) => item.condition ?? true),
+					isActive: ['Site Backups', 'Snapshots'].includes(routeName),
 					disabled: enforce2FA,
 				},
 				{
@@ -165,12 +179,29 @@ export default {
 					disabled: enforce2FA,
 				},
 				{
+					name: 'Marketplace',
+					icon: () => h(App),
+					route: '/apps',
+					isActive: routeName.startsWith('Marketplace'),
+					condition:
+						this.$team.doc?.is_desk_user ||
+						(!!this.$team.doc.is_developer && this.$session.hasAppsAccess),
+					disabled: enforce2FA,
+				},
+				{
 					name: 'Billing',
 					icon: () => h(WalletCards),
 					route: '/billing',
 					isActive: routeName.startsWith('Billing'),
 					condition:
 						this.$team.doc?.is_desk_user || this.$session.hasBillingAccess,
+					disabled: enforce2FA,
+				},
+				{
+					name: 'Access Requests',
+					icon: () => h(Key),
+					route: '/access-requests',
+					isActive: routeName === 'Access Requests',
 					disabled: enforce2FA,
 				},
 				{

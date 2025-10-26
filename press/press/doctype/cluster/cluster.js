@@ -5,6 +5,7 @@ frappe.ui.form.on('Cluster', {
 	refresh: function (frm) {
 		[
 			[__('Create Servers'), 'create_servers', frm.doc.status === 'Active'],
+			[__('Create Proxy'), 'create_proxy', frm.doc.status === 'Active'],
 			[__('Add Images'), 'add_images', frm.doc.status === 'Active'],
 		].forEach(([label, method, condition]) => {
 			if (typeof condition === 'undefined' || condition) {
@@ -29,6 +30,36 @@ frappe.ui.form.on('Cluster', {
 					__('Visit OCI Dashboard'),
 				);
 			}
+		}
+		if (frm.doc.cloud_provider === 'AWS EC2' && frm.doc.status === 'Active') {
+			// add btn, when clicked creates a prompt and calls check_machine_availability with value input
+			frm.add_custom_button(__('Check Machine Availability'), () => {
+				frappe.prompt(
+					{
+						label: __('Machine Type'),
+						fieldname: 'machine_type',
+						fieldtype: 'Data',
+						reqd: 1,
+					},
+					(values) => {
+						frm.call('check_machine_availability', values).then((r) => {
+							if (r.message) {
+								frappe.show_alert({
+									message: __('Machine is available'),
+									indicator: 'green',
+								});
+							} else {
+								frappe.show_alert({
+									message: __('Machine is not available'),
+									indicator: 'red',
+								});
+							}
+						});
+					},
+					__('Check Machine Availability'),
+					__('Check'),
+				);
+			});
 		}
 	},
 });

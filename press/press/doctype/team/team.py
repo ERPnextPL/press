@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from hashlib import blake2b
+from typing import TYPE_CHECKING
 
 import frappe
 from frappe import _
@@ -15,6 +16,7 @@ from frappe.utils import get_fullname, get_url_to_form, random_string
 
 from press.api.client import dashboard_whitelist
 from press.exceptions import FrappeioServerNotSet
+from press.press.doctype.communication_info.communication_info import get_communication_info
 from press.press.doctype.telegram_message.telegram_message import TelegramMessage
 from press.utils import get_valid_teams_for_user, has_role, log_error
 from press.utils.billing import (
@@ -24,6 +26,9 @@ from press.utils.billing import (
 	process_micro_debit_test_charge,
 )
 from press.utils.telemetry import capture
+
+if TYPE_CHECKING:
+	from press.press.doctype.account_request.account_request import AccountRequest
 
 
 class Team(Document):
@@ -36,7 +41,7 @@ class Team(Document):
 		from frappe.types import DF
 
 		from press.press.doctype.child_team_member.child_team_member import ChildTeamMember
-		from press.press.doctype.communication_email.communication_email import CommunicationEmail
+		from press.press.doctype.communication_info.communication_info import CommunicationInfo
 		from press.press.doctype.invoice_discount.invoice_discount import InvoiceDiscount
 		from press.press.doctype.team_member.team_member import TeamMember
 
@@ -44,12 +49,11 @@ class Team(Document):
 		apply_npo_discount: DF.Check
 		benches_enabled: DF.Check
 		billing_address: DF.Link | None
-		billing_email: DF.Data | None
 		billing_name: DF.Data | None
 		billing_team: DF.Link | None
 		child_team_members: DF.Table[ChildTeamMember]
 		code_servers_enabled: DF.Check
-		communication_emails: DF.Table[CommunicationEmail]
+		communication_infos: DF.Table[CommunicationInfo]
 		company_logo: DF.Attach | None
 		country: DF.Link | None
 		currency: DF.Link | None
@@ -76,11 +80,11 @@ class Team(Document):
 		mpesa_enabled: DF.Check
 		mpesa_phone_number: DF.Data | None
 		mpesa_tax_id: DF.Data | None
-		notify_email: DF.Data | None
 		parent_team: DF.Link | None
 		partner_commission: DF.Percent
 		partner_email: DF.Data | None
 		partner_referral_code: DF.Data | None
+		partner_status: DF.Literal["Active", "Inactive"]
 		partner_tier: DF.Data | None
 		partnership_date: DF.Date | None
 		payment_mode: DF.Literal["", "Card", "Prepaid Credits", "Paid By Partner"]
@@ -111,7 +115,6 @@ class Team(Document):
 		"billing_team",
 		"team_members",
 		"child_team_members",
-		"notify_email",
 		"country",
 		"currency",
 		"payment_mode",
@@ -130,7 +133,9 @@ class Team(Document):
 		"mpesa_tax_id",
 		"mpesa_phone_number",
 		"mpesa_enabled",
+		"razorpay_enabled",
 		"account_request",
+		"partner_status",
 	)
 
 	def get_doc(self, doc):
@@ -152,6 +157,7 @@ class Team(Document):
 		doc.balance = self.get_balance()
 		doc.is_desk_user = user.user_type == "System User"
 		doc.is_support_agent = has_role("Press Support Agent")
+		doc.can_request_access = has_role("Press Support Agent")
 		doc.valid_teams = get_valid_teams_for_user(frappe.session.user)
 		doc.onboarding = self.get_onboarding()
 		doc.billing_info = self.billing_info()
@@ -172,6 +178,7 @@ class Team(Document):
 			],
 			as_dict=True,
 		)
+		doc.communication_infos = self.get_communication_infos()
 
 	def onload(self):
 		load_address_and_contact(self)
@@ -197,19 +204,10 @@ class Team(Document):
 		self.validate_billing_team()
 
 	def before_insert(self):
-		self.set_notification_emails()
-
 		self.currency = "INR" if self.country == "India" else "USD"
 
 		if not self.referrer_id:
 			self.set_referrer_id()
-
-	def set_notification_emails(self):
-		if not self.notify_email:
-			self.notify_email = self.user
-
-		if not self.billing_email:
-			self.billing_email = self.user
 
 	def set_referrer_id(self):
 		h = blake2b(digest_size=4)
@@ -305,13 +303,13 @@ class Team(Document):
 			user.append_roles(account_request.role)
 			user.save(ignore_permissions=True)
 
+		if frappe.db.exists("Team", {"user": user.name}):
+			frappe.throw("You have already an account with same email. Please login using the same email.")
+
 		team.team_title = "Parent Team"
 		team.insert(ignore_permissions=True, ignore_links=True)
 		team.append("team_members", {"user": user.name})
-		if not account_request.invited_by_parent_team:
-			team.append("communication_emails", {"type": "invoices", "value": user.name})
-			team.append("communication_emails", {"type": "marketplace_notifications", "value": user.name})
-		else:
+		if account_request.invited_by_parent_team:
 			team.parent_team = account_request.invited_by
 
 		if account_request.product_trial:
@@ -460,7 +458,6 @@ class Team(Document):
 
 		self.validate_payment_mode()
 		self.update_draft_invoice_payment_mode()
-		self.set_notification_emails()
 
 		if (
 			not self.is_new()
@@ -618,6 +615,22 @@ class Team(Document):
 			self.stripe_customer_id = customer.id
 			self.save()
 
+	@dashboard_whitelist()
+	def get_communication_infos(self):
+		return (
+			[{"channel": c.channel, "type": c.type, "value": c.value} for c in self.communication_infos]
+			if hasattr(self, "communication_infos")
+			else []
+		)
+
+	@dashboard_whitelist()
+	def update_communication_infos(self, values: list[dict]):
+		from press.press.doctype.communication_info.communication_info import (
+			update_communication_infos as update_infos,
+		)
+
+		update_infos("Team", self.name, values)
+
 	@frappe.whitelist()
 	def update_billing_details(self, billing_details):
 		if self.billing_address:
@@ -724,23 +737,26 @@ class Team(Document):
 		stripe = get_stripe()
 		payment_method = stripe.PaymentMethod.retrieve(payment_method_id)
 
-		doc = frappe.get_doc(
-			{
-				"doctype": "Stripe Payment Method",
-				"stripe_payment_method_id": payment_method["id"],
-				"last_4": payment_method["card"]["last4"],
-				"name_on_card": payment_method["billing_details"]["name"],
-				"expiry_month": payment_method["card"]["exp_month"],
-				"expiry_year": payment_method["card"]["exp_year"],
-				"brand": payment_method["card"]["brand"] or "",
-				"team": self.name,
-				"stripe_setup_intent_id": setup_intent_id,
-				"stripe_mandate_id": mandate_id if mandate_id else None,
-				"stripe_mandate_reference": mandate_reference if mandate_reference else None,
-				"is_verified_with_micro_charge": verified_with_micro_charge,
-			}
-		)
-		doc.insert()
+		try:
+			doc = frappe.get_doc(
+				{
+					"doctype": "Stripe Payment Method",
+					"stripe_payment_method_id": payment_method["id"],
+					"last_4": payment_method["card"]["last4"],
+					"name_on_card": payment_method["billing_details"]["name"],
+					"expiry_month": payment_method["card"]["exp_month"],
+					"expiry_year": payment_method["card"]["exp_year"],
+					"brand": payment_method["card"]["brand"] or "",
+					"team": self.name,
+					"stripe_setup_intent_id": setup_intent_id,
+					"stripe_mandate_id": mandate_id if mandate_id else None,
+					"stripe_mandate_reference": mandate_reference if mandate_reference else None,
+					"is_verified_with_micro_charge": verified_with_micro_charge,
+				}
+			)
+			doc.insert()
+		except Exception:
+			frappe.log_error("Failed to create new Stripe Payment Method")
 
 		# unsuspend sites on payment method added
 		self.unsuspend_sites(reason="Payment method added")
@@ -1041,7 +1057,6 @@ class Team(Document):
 			self.skip_onboarding
 			or is_payment_mode_set
 			or frappe.db.get_value("User", self.user, "user_type") == "System User"
-			or has_role("Press Support Agent")
 		):
 			complete = True
 		elif saas_site_request:
@@ -1199,14 +1214,6 @@ class Team(Document):
 			doctype="Invoice", team=self.name, period_start=today, type="Subscription"
 		).insert()
 
-	def notify_with_email(self, recipients: list[str], **kwargs):
-		if not self.send_notifications:
-			return
-		if not recipients:
-			recipients = [self.notify_email]
-
-		frappe.sendmail(recipients=recipients, **kwargs)
-
 	@frappe.whitelist()
 	def send_telegram_alert_for_failed_payment(self, invoice):
 		team_url = get_url_to_form("Team", self.name)
@@ -1217,10 +1224,7 @@ class Team(Document):
 	@frappe.whitelist()
 	def send_email_for_failed_payment(self, invoice, sites=None):
 		invoice = frappe.get_doc("Invoice", invoice)
-		email = (
-			frappe.db.get_value("Communication Email", {"parent": self.name, "type": "invoices"}, "value")
-			or self.user
-		)
+		email = get_communication_info("Email", "Billing", "Team", self.name)
 		payment_method = self.default_payment_method
 		last_4 = frappe.db.get_value("Stripe Payment Method", payment_method, "last_4")
 		account_update_link = frappe.utils.get_url("/dashboard")

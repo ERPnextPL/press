@@ -3,7 +3,7 @@
 		class="flex h-screen w-screen flex-col items-center justify-center bg-gray-600 bg-opacity-50"
 		v-if="
 			$resources?.siteRequest?.doc?.status &&
-			!['Error', 'Site Created'].includes($resources?.siteRequest?.doc?.status)
+			!['Error'].includes($resources?.siteRequest?.doc?.status)
 		"
 	>
 		<SignupSpinner />
@@ -119,7 +119,7 @@
 </template>
 <script>
 import LoginBox from '../../components/auth/LoginBox.vue';
-import Spinner from '../../components/Spinner.vue';
+import Spinner from '../../components/LoginSpinner.vue';
 import { Progress } from 'frappe-ui';
 
 export default {
@@ -154,7 +154,11 @@ export default {
 				realtime: true,
 				auto: true,
 				onSuccess(doc) {
-					if (doc.status == 'Site Created') this.loginToSite();
+					if (doc.status == 'Site Created') {
+						setTimeout(() => {
+							this.loginToSite();
+						}, 2000);
+					}
 					else if (
 						doc.status == 'Wait for Site' ||
 						doc.status == 'Prefilling Setup Wizard'
@@ -172,8 +176,11 @@ export default {
 							};
 						},
 						onSuccess: (data) => {
-							if (data.status === 'Site Created') {
-								return this.loginToSite();
+							if (data.current_step === 'Site Created') {
+								setTimeout(() => {
+									this.loginToSite();
+								}, 2000);
+								return;
 							}
 
 							const currentStepMap = {

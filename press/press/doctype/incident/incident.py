@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import urllib.parse
 from base64 import b64encode
 from datetime import timedelta
 from functools import cached_property
@@ -21,6 +22,8 @@ from tenacity.retry import retry_if_not_result
 from twilio.base.exceptions import TwilioRestException
 
 from press.api.server import prometheus_query
+from press.press.doctype.communication_info.communication_info import get_communication_info
+from press.press.doctype.server.server import MARIADB_DATA_MNT_POINT
 from press.telegram_utils import Telegram
 from press.utils import log_error
 
@@ -40,7 +43,7 @@ if TYPE_CHECKING:
 	)
 	from press.press.doctype.monitor_server.monitor_server import MonitorServer
 	from press.press.doctype.press_settings.press_settings import PressSettings
-	from press.press.doctype.server.server import Server
+	from press.press.doctype.server.server import BaseServer, Server
 
 INCIDENT_ALERT = "Sites Down"  # TODO: make it a field or child table somewhere #
 INCIDENT_SCOPE = (
@@ -81,8 +84,11 @@ class Incident(WebsiteGenerator):
 		acknowledged_by: DF.Link | None
 		alert: DF.Link | None
 		alerts: DF.Table[IncidentAlerts]
+		called_customer: DF.Check
 		cluster: DF.Link | None
+		corrective_suggestions: DF.Table[IncidentSuggestion]
 		description: DF.TextEditor | None
+		investigation: DF.Link | None
 		likely_cause: DF.Text | None
 		phone_call: DF.Check
 		preventive_suggestions: DF.Table[IncidentSuggestion]
@@ -104,7 +110,6 @@ class Incident(WebsiteGenerator):
 		]
 		subject: DF.Data | None
 		subtype: DF.Literal["High CPU: user", "High CPU: iowait", "Disk full"]
-		suggestions: DF.Table[IncidentSuggestion]
 		type: DF.Literal["Database Down", "Server Down", "Proxy Down"]
 		updates: DF.Table[IncidentUpdates]
 	# end: auto-generated types
@@ -122,12 +127,27 @@ class Incident(WebsiteGenerator):
 		return bool(frappe.db.get_single_value("Incident Settings", "email_alerts", cache=True))
 
 	def after_insert(self):
+		"""
+		Start investigating the incident since we have already waited 5m before creating it
+		send sms and email notifications
+		"""
+		try:
+			incident_investigator = frappe.get_doc(
+				{"doctype": "Incident Investigator", "incident": self.name, "server": self.server}
+			)
+			incident_investigator.insert(ignore_permissions=True)
+			self.investigation = incident_investigator.name
+		except frappe.ValidationError:
+			# Investigator in cool off period
+			pass
 		self.send_sms_via_twilio()
 		self.send_email_notification()
 
 	def on_update(self):
 		if self.has_value_changed("status"):
 			self.send_email_notification()
+			if self.status == "Confirmed" and not self.called_customer:
+				self.call_customers()
 
 	def vcpu(self, server_type, server_name):
 		vm_name = frappe.db.get_value(server_type, server_name, "virtual_machine")
@@ -193,9 +213,13 @@ class Incident(WebsiteGenerator):
 	@frappe.whitelist()
 	def regather_info_and_screenshots(self):
 		self.identify_affected_resource()
+		self.identify_problem()
 		self.take_grafana_screenshots()
 
-	def get_cpu_state(self, resource: str):
+	def get_cpu_state(self, resource: str) -> tuple[str, float]:
+		"""
+		Returns the prominent CPU state and its percentage
+		"""
 		timespan = get_confirmation_threshold_duration()
 		cpu_info = prometheus_query(
 			f"""avg by (mode)(rate(node_cpu_seconds_total{{instance="{resource}", job="node"}}[{timespan}s])) * 100""",
@@ -248,7 +272,7 @@ class Incident(WebsiteGenerator):
 		self.add_corrective_suggestion("Reboot Server")
 		self.add_preventive_suggestion("Upgrade database server for more memory")
 
-	def categorize_db_issues(self, cpu_state):
+	def categorize_db_cpu_issues(self, cpu_state):
 		self.type = "Database Down"
 		if cpu_state == "user":
 			self.update_user_db_issue()
@@ -261,25 +285,42 @@ class Incident(WebsiteGenerator):
 	def update_high_io_server_issue(self):
 		pass
 
-	def categorize_server_issues(self, cpu_state):
+	def categorize_server_cpu_issues(self, cpu_state):
 		self.type = "Server Down"
 		if cpu_state == "user":
 			self.update_user_server_issue()
 		elif cpu_state == "iowait":
 			self.update_high_io_server_issue()
 
-	def identify_problem(self):
-		if site := self.get_down_site():
-			try:
-				ret = requests.get(f"https://{site}/api/method/ping", timeout=10)
-			except requests.RequestException as e:
-				self.add_description(f"Error pinging sample site {site}: {e!s}")
-			else:
-				self.add_description(f"Ping response for sample site {site}: {ret.status_code} {ret.reason}")
+	def ping_sample_site(self):
+		if not (site := self.get_down_site()):
+			return None
+		try:
+			ret = requests.get(f"https://{site}/api/method/ping", timeout=10)
+		except requests.RequestException as e:
+			self.add_description(f"Error pinging sample site {site}: {e!s}")
+			return None
+		else:
+			self.add_description(f"Ping response for sample site {site}: {ret.status_code} {ret.reason}")
+			return ret.status_code
 
-		if not self.resource:
-			return
-			# TODO: Try random shit if resource isn't identified
+	def categorize_disk_full_issue(self):
+		self.likely_cause = "Disk is full"
+		self.add_corrective_suggestion("Add more storage")
+		self.add_preventive_suggestion("Enable automatic addition of storage")
+
+	def identify_problem(self):
+		pong = self.ping_sample_site()
+		if not self.resource and pong and pong == 500:
+			db: DatabaseServer = frappe.get_doc("Database Server", self.database_server)
+			if db.is_disk_full(MARIADB_DATA_MNT_POINT):
+				self.resource_type = "Database Server"
+				self.resource = self.database_server
+				self.type = "Database Down"
+				self.subtype = "Disk full"
+				self.categorize_disk_full_issue()
+				return
+			# TODO: Try more random shit if resource isn't identified
 			# Eg: Check mysql up/ docker up/ container up
 			# Ping site for error code to guess more accurately
 			# 500 would mean mysql down or bug in app/config
@@ -291,11 +332,11 @@ class Incident(WebsiteGenerator):
 			return
 
 		if self.resource_type == "Database Server":
-			self.categorize_db_issues(state)
+			self.categorize_db_cpu_issues(state)
 		elif self.resource_type == "Server":
-			self.categorize_server_issues(state)
+			self.categorize_server_cpu_issues(state)
 
-			# TODO: categorize proxy issues #
+		# TODO: categorize proxy issues #
 
 	@property
 	def other_resource(self):
@@ -343,13 +384,6 @@ class Incident(WebsiteGenerator):
 			self.add_node_exporter_screenshot(page, self.other_resource)
 
 		self.save()
-
-	@frappe.whitelist()
-	def ignore_for_server(self):
-		"""
-		Ignore incidents on server (Don't call)
-		"""
-		frappe.db.set_value("Server", self.server, "ignore_incidents_since", frappe.utils.now_datetime())
 
 	@frappe.whitelist()
 	def reboot_database_server(self):
@@ -451,7 +485,8 @@ class Incident(WebsiteGenerator):
 			return press_settings.twilio_client
 		except Exception:
 			log_error("Twilio Client not configured in Press Settings")
-			frappe.db.commit()
+			if not frappe.flags.in_test:
+				frappe.db.commit()
 			raise
 
 	@retry(
@@ -488,8 +523,8 @@ Likely due to insufficient balance or incorrect credentials""",
 		if not self.phone_call or not self.global_phone_call_enabled:
 			return
 		if (
-			ignore_since := frappe.db.get_value("Server", self.server, "ignore_incidents_since")
-		) and ignore_since < frappe.utils.now_datetime():
+			ignore_till := frappe.db.get_value("Server", self.server, "ignore_incidents_till")
+		) and ignore_till > frappe.utils.now_datetime():
 			return
 		for human in self.get_humans():
 			if not (call := self.call_human(human)):
@@ -519,7 +554,7 @@ Likely due to insufficient balance or incorrect credentials""",
 		Ref: https://support.twilio.com/hc/en-us/articles/223181548-Can-I-set-up-one-API-call-to-send-messages-to-a-list-of-people-
 		"""
 		if (
-			ignore_since := frappe.db.get_value("Server", self.server, "ignore_incidents_since")
+			ignore_since := frappe.db.get_value("Server", self.server, "ignore_incidents_till")
 		) and ignore_since < frappe.utils.now_datetime():
 			return
 		domain = frappe.db.get_value("Press Settings", None, "domain")
@@ -534,6 +569,7 @@ Incident URL: {incident_link}"""
 			self.twilio_client.messages.create(
 				to=human.phone, from_=self.twilio_phone_number, body=message_body
 			)
+		self.reload()  # In case the phone call status is modified by the investigator before the sms is sent
 		self.sms_sent = 1
 		self.save()
 
@@ -552,7 +588,7 @@ Incident URL: {incident_link}"""
 			subject = self.get_email_subject()
 			message = self.get_email_message()
 			frappe.sendmail(
-				recipients=[frappe.db.get_value("Team", team, "notify_email")],
+				recipients=get_communication_info("Email", "Server Activity", "Server", self.server),
 				subject=subject,
 				template="incident",
 				args={
@@ -581,6 +617,60 @@ Incident URL: {incident_link}"""
 			"Acknowledged": f"{acknowledged_by} from our team has acknowledged the incident and is actively investigating. Please allow them some time to diagnose and address the issue.",
 			"Resolved": f"Your sites are now up! {acknowledged_by} has resolved this incident. We will keep monitoring your sites for any further issues",
 		}[self.status]
+
+	def call_customers(self):
+		frappe.enqueue_doc(
+			self.doctype,
+			self.name,
+			"_call_customers",
+			queue="default",
+			enqueue_after_commit=True,
+			at_front=True,
+			job_id=f"incident||call_customers||{self.name}",
+			deduplicate=True,
+		)
+
+	def _call_customers(self):
+		if not self.phone_call:
+			return
+
+		phone_nos = get_communication_info("Phone Call", "Incident", "Server", self.server)
+		if not phone_nos:
+			return
+
+		for phone_no in phone_nos:
+			frappe.enqueue_doc(
+				self.doctype,
+				self.name,
+				"_call_customer",
+				queue="default",
+				timeout=1800,
+				enqueue_after_commit=True,
+				phone_no=phone_no,
+			)
+
+		self.add_comment("Comment", f"Called customers at {', '.join(phone_nos)}")
+
+		self.called_customer = 1
+		self.save()
+
+	def _call_customer(self, phone_no: str):
+		twilio_client = self.twilio_client
+		if not twilio_client:
+			return
+		from_phone = self.twilio_phone_number
+		server_title = frappe.db.get_value("Server", self.server, "title") or self.server
+		if not from_phone or not server_title:
+			return
+
+		server_title_encoded = urllib.parse.quote(server_title)
+
+		press_public_base_url = frappe.utils.get_url()
+		twilio_client.calls.create(
+			url=f"{press_public_base_url}/api/method/press.api.message.confirmed_incident?server_title={server_title_encoded}",
+			to=phone_no,
+			from_=from_phone,
+		)
 
 	def add_acknowledgment_update(
 		self,
@@ -639,6 +729,7 @@ Incident URL: {incident_link}"""
 			return
 		else:
 			if not last_resolved.is_enough_firing:
+				self.create_log_for_server(is_resolved=True)
 				self.resolve()
 
 	def resolve(self):
@@ -647,6 +738,18 @@ Incident URL: {incident_link}"""
 		else:
 			self.status = "Resolved"
 		self.save()
+
+	def create_log_for_server(self, is_resolved: bool = False):
+		"""We will create a incident log on the server activity for confirmed incidents and their resolution"""
+		try:
+			incidence_server: BaseServer = frappe.get_cached_doc(self.resource_type, self.resource)
+		except Exception:
+			incidence_server: Server = frappe.get_cached_doc("Server", self.server)
+
+		incidence_server.create_log(
+			"Incident",
+			f"{self.alert} resolved" if is_resolved else f"{self.alert} reported",
+		)
 
 	@property
 	def time_to_call_for_help(self) -> bool:
@@ -660,7 +763,7 @@ Incident URL: {incident_link}"""
 			seconds=get_call_repeat_interval()
 		)
 
-	@property
+	@cached_property
 	def sites_down(self) -> list[str]:
 		return self.monitor_server.get_sites_down_for_server(str(self.server))
 
@@ -733,6 +836,7 @@ def resolve_incidents():
 		incident = Incident("Incident", incident_name)
 		incident.check_resolved()
 		if incident.time_to_call_for_help or incident.time_to_call_for_help_again:
+			incident.create_log_for_server()
 			incident.call_humans()
 
 
@@ -740,16 +844,16 @@ def notify_ignored_servers():
 	servers = frappe.qb.DocType("Server")
 	if not (
 		ignored_servers := frappe.qb.from_(servers)
-		.select(servers.name, servers.ignore_incidents_since)
+		.select(servers.name, servers.ignore_incidents_till)
 		.where(servers.status == "Active")
-		.where(servers.ignore_incidents_since.isnotnull())
+		.where(servers.ignore_incidents_till.isnotnull())
 		.run(as_dict=True)
 	):
 		return
 
 	message = "The following servers are being ignored for incidents:\n\n"
 	for server in ignored_servers:
-		message += f"{server.name} since {frappe.utils.pretty_date(server.ignore_incidents_since)}\n"
+		message += f"{server.name} till {frappe.utils.pretty_date(server.ignore_incidents_till)}\n"
 	message += "\n@adityahase @balamurali27 @saurabh6790\n"
 	telegram = Telegram()
 	telegram.send(message)

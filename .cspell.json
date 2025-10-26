@@ -82,6 +82,7 @@
 		"COMPATBILITY",
 		"confs",
 		"Consolas",
+		"Containerised",
 		"cpath",
 		"cpcommerce",
 		"cpus",
@@ -305,6 +306,7 @@
 		"nistp",
 		"nofail",
 		"NOPASSWD",
+		"NOFORK",
 		"Noronha",
 		"Norte",
 		"notin",
@@ -1045,6 +1047,8 @@
 		"missingok",
 		"notifempty",
 		"nocompress",
+		"ntvs",
+		"njsproj",
 		"ibtmp",
 		"ibdata",
 		"recognise",
@@ -1053,6 +1057,8 @@
 		"vagrant",
 		"2.4.6",
 		"unsuspension",
+		"dcbs",
+		"probability",
 		"fcrestore",
 		"vasile",
 		"Xpai",
@@ -1082,6 +1088,13 @@
 		"rivo",
 		"mergify",
 		"ncdu",
-		"interactjs"
+		"gtid",
+		"VMI",
+		"efi",
+		"interactjs",
+		"ocpu",
+		"NOFORK",
+		"Incase",
+		"Twillio"
 	]
 }

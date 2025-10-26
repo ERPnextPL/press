@@ -72,6 +72,14 @@ To self host or to setup Press locally follow the steps in the [Local Developmen
 Press uses `/tmp/ansible` on remote hosts for Ansible's temporary files.
 Ensure this directory exists and is writable by all remote users.
 
+### Pre-commit
+
+There's a [pre-commit](https://pre-commit.com/) hook included in the repo. You can set it up by doing
+
+```bash
+pip install pre-commit
+pre-commit install
+```
 ## Learn and connect
 
 - [Telegram Public Group](https://t.me/frappecloud)
