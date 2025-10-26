@@ -12,6 +12,7 @@
   "redis_cache_size",
   "use_app_cache",
   "compress_app_cache",
+  "is_code_server_enabled",
   "column_break_uyow",
   "requires_arm_build",
   "requires_intel_build",
@@ -170,6 +171,13 @@
    "fieldname": "compress_app_cache",
    "fieldtype": "Check",
    "label": "Compress App Cache"
+  },
+  {
+   "fetch_from": "group.is_code_server_enabled",
+   "fieldname": "is_code_server_enabled",
+   "fieldtype": "Check",
+   "label": "Is Code Server Enabled",
+   "read_only": 1
   },
   {
    "fieldname": "parameters_tab",
