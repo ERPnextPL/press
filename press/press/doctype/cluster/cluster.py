@@ -64,7 +64,7 @@ class Cluster(Document):
 		aws_secret_access_key: DF.Password | None
 		beta: DF.Check
 		cidr_block: DF.Data | None
-		cloud_provider: DF.Literal["AWS EC2", "Generic", "OCI", "Hetzner"]
+		cloud_provider: DF.Literal["AWS EC2", "Generic", "OCI", "Hetzner", "Proxmox"]
 		description: DF.Data | None
 		has_arm_support: DF.Check
 		hybrid: DF.Check
