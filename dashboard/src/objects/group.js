@@ -400,6 +400,54 @@ export default {
 							},
 						};
 					},
+					secondaryAction({
+						listResource: apps,
+						documentResource: releaseGroup,
+					}) {
+						return {
+							label: 'Fetch Latest Updates',
+							slots: {
+								prefix: icon(LucideHardDriveDownload),
+							},
+							loading: releaseGroup.fetchLatestAppUpdates.loading,
+							disabled: releaseGroup.fetchLatestAppUpdates.loading,
+							onClick() {
+								if (releaseGroup.fetchLatestAppUpdates.loading) {
+									return;
+								}
+
+								const appRows = (Array.isArray(apps.data) ? apps.data : []).filter(
+									(app) => app?.name,
+								);
+
+								if (!appRows.length) {
+									toast.error('No apps available to fetch updates');
+									return;
+								}
+
+								const fetchAllPromise = (async () => {
+									for (const app of appRows) {
+										await releaseGroup.fetchLatestAppUpdates.submit({
+											app: app.name,
+										});
+									}
+								})();
+
+								toast.promise(fetchAllPromise, {
+									loading: 'Fetching latest updates for all apps...',
+									success: () => {
+										apps.reload();
+										releaseGroup.reload();
+										const count = appRows.length;
+										return `Fetched latest updates for ${count} app${
+											count === 1 ? '' : 's'
+										}`;
+									},
+									error: (e) => getToastErrorMessage(e),
+								});
+							},
+						};
+					},
 				},
 			},
 			{
