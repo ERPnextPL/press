@@ -48,6 +48,7 @@ from press.marketplace.doctype.marketplace_app_plan.marketplace_app_plan import 
 	MarketplaceAppPlan,
 )
 from press.press.doctype.communication_info.communication_info import get_communication_info
+from press.saas.doctype.product_trial.product_trial import create_free_app_subscription
 from press.utils.jobs import has_job_timeout_exceeded
 from press.utils.telemetry import capture
 from press.utils.webhook import create_webhook_event
@@ -327,7 +328,7 @@ class Site(Document, TagHelpers):
 		doc.update_information = self.get_update_information()
 		doc.actions = self.get_actions()
 		server = frappe.get_value("Server", self.server, ["ip", "proxy_server", "team", "title"], as_dict=1)
-		doc.cluster = frappe.db.get_value("Cluster", self.cluster, ["title", "image"], as_dict=1)
+		doc.cluster = frappe.db.get_value("Cluster", self.cluster, ["title", "image"], as_dict=True)
 		doc.outbound_ip = server.ip
 		doc.server_team = server.team
 		doc.server_title = server.title
@@ -745,6 +746,8 @@ class Site(Document, TagHelpers):
 	def install_marketplace_conf(self, app: str, plan: str | None = None):
 		if plan:
 			MarketplaceAppPlan.create_marketplace_app_subscription(self.name, app, plan, self.team)
+		else:
+			create_free_app_subscription(app, self.name)
 		marketplace_app_hook(app=app, site=self, op="install")
 
 	def uninstall_marketplace_conf(self, app: str):
@@ -1653,7 +1656,7 @@ class Site(Document, TagHelpers):
 
 	@dashboard_whitelist()
 	@site_action(["Active", "Broken"])
-	@action_guard(SiteActions.LOGIN_AS_ADMINISTRATOR)
+	@action_guard(SiteActions.LoginAsAdmin)
 	def login_as_admin(self, reason=None):
 		sid = self.login(reason=reason)
 		return f"https://{self.host_name or self.name}/app?sid={sid}"
@@ -3081,7 +3084,7 @@ class Site(Document, TagHelpers):
 	def get_sites_for_backup(
 		cls, interval: int, backup_type: Literal["Logical", "Physical"] = "Logical"
 	) -> list[dict]:
-		sites = cls.get_sites_without_backup_in_interval(interval)
+		sites = cls.get_sites_without_backup_in_interval(interval, backup_type)
 		servers_with_backups = frappe.get_all(
 			"Server",
 			{"status": "Active", "skip_scheduled_backups": False},
@@ -3108,7 +3111,9 @@ class Site(Document, TagHelpers):
 		)
 
 	@classmethod
-	def get_sites_without_backup_in_interval(cls, interval: int) -> list[str]:
+	def get_sites_without_backup_in_interval(
+		cls, interval: int, backup_type: Literal["Logical", "Physical"] = "Logical"
+	) -> list[str]:
 		"""Return active sites that haven't had backup taken in interval hours."""
 		interval_hrs_ago = frappe.utils.add_to_date(None, hours=-interval)
 		all_sites = set(
@@ -3125,30 +3130,36 @@ class Site(Document, TagHelpers):
 		)
 		return list(
 			all_sites
-			- set(cls.get_sites_with_backup_in_interval(interval_hrs_ago))
-			- set(cls.get_sites_with_pending_backups(interval_hrs_ago))
+			- set(cls.get_sites_with_backup_in_interval(interval_hrs_ago, backup_type))
+			- set(cls.get_sites_with_pending_backups(interval_hrs_ago, backup_type))
 		)
 		# TODO: query using creation time of account request for actual new sites <03-09-21, Balamurali M> #
 
 	@classmethod
-	def get_sites_with_pending_backups(cls, interval_hrs_ago: datetime) -> list[str]:
+	def get_sites_with_pending_backups(
+		cls, interval_hrs_ago: datetime, backup_type: Literal["Logical", "Physical"] = "Logical"
+	) -> list[str]:
 		return frappe.get_all(
 			"Site Backup",
 			{
 				"status": ("in", ["Running", "Pending"]),
 				"creation": (">=", interval_hrs_ago),
+				"physical": bool(backup_type == "Physical"),
 			},
 			pluck="site",
 		)
 
 	@classmethod
-	def get_sites_with_backup_in_interval(cls, interval_hrs_ago) -> list[str]:
+	def get_sites_with_backup_in_interval(
+		cls, interval_hrs_ago, backup_type: Literal["Logical", "Physical"] = "Logical"
+	) -> list[str]:
 		return frappe.get_all(
 			"Site Backup",
 			{
 				"creation": (">", interval_hrs_ago),
 				"status": ("!=", "Failure"),
 				"owner": "Administrator",
+				"physical": bool(backup_type == "Physical"),
 			},
 			pluck="site",
 			ignore_ifnull=True,
