@@ -459,25 +459,32 @@ def prometheus_query(query, function, timezone, timespan, timegrain):
 	}
 
 	try:
-		response = requests.get(url, params=query, auth=("frappe", str(password))).json()
-	except requests.exceptions.RequestException:
+		response = requests.get(url, params=query, auth=("frappe", str(password)))
+		response.raise_for_status()
+		data = response.json()
+	except (requests.exceptions.RequestException, ValueError):
 		frappe.throw("Unable to connect to monitor server", MonitorServerDown)
 
 	datasets = []
 	labels = []
 
-	if not data["data"]["result"]:
+	if data.get("status") != "success":
+		return {"datasets": datasets, "labels": labels}
+
+	result = data.get("data", {}).get("result", [])
+
+	if not result:
 		return {"datasets": datasets, "labels": labels}
 
 	timegrain_delta = timedelta(seconds=timegrain)
 	labels = [(start + i * timegrain_delta).timestamp() for i in range((end - start) // timegrain_delta + 1)]
 
-	for index in range(len(data["data"]["result"])):
+	for index in range(len(result)):
 		dataset = {
-			"name": function(data["data"]["result"][index]["metric"]),
+			"name": function(result[index]["metric"]),
 			"values": [None] * len(labels),  # Initialize with None
 		}
-		for label, value in data["data"]["result"][index]["values"]:
+		for label, value in result[index]["values"]:
 			dataset["values"][labels.index(label)] = flt(value, 2)
 		datasets.append(dataset)
 
