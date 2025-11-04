@@ -15,6 +15,7 @@ from subprocess import Popen
 from typing import Literal
 
 import frappe
+from frappe import _
 import semantic_version
 from frappe.core.utils import find
 from frappe.model.document import Document
@@ -453,7 +454,17 @@ class DeployCandidate(Document):
 		if dependency.islower():
 			dependency = dependency.upper() + "_VERSION"
 
-		version = find(self.dependencies, lambda x: x.dependency == dependency).version
+		dependency_doc = find(self.dependencies, lambda x: x.dependency == dependency)
+
+		if not dependency_doc or not dependency_doc.version:
+			frappe.throw(
+				_("Dependency {0} is not configured for Deploy Candidate {1}.").format(
+					dependency,
+					self.name,
+				)
+			)
+
+		version = dependency_doc.version
 
 		if as_env:
 			return f"{dependency} {version}"
