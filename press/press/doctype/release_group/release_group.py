@@ -47,11 +47,12 @@ if TYPE_CHECKING:
 	from press.press.doctype.user_ssh_key.user_ssh_key import UserSSHKey
 
 DEFAULT_DEPENDENCIES = [
-	{"dependency": "NVM_VERSION", "version": "0.36.0"},
-	{"dependency": "NODE_VERSION", "version": "14.19.0"},
-	{"dependency": "PYTHON_VERSION", "version": "3.7"},
-	{"dependency": "WKHTMLTOPDF_VERSION", "version": "0.12.5"},
-	{"dependency": "BENCH_VERSION", "version": "5.25.1"},
+        {"dependency": "NVM_VERSION", "version": "0.36.0"},
+        {"dependency": "NODE_VERSION", "version": "14.19.0"},
+        {"dependency": "PYTHON_VERSION", "version": "3.7"},
+        {"dependency": "WKHTMLTOPDF_VERSION", "version": "0.12.5"},
+        {"dependency": "BENCH_VERSION", "version": "5.25.1"},
+        {"dependency": "PIP_VERSION", "version": "25.3"},
 ]
 
 SUPPORTED_WKHTMLTOPDF_VERSIONS = ["0.12.5", "0.12.6"]
