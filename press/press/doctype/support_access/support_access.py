@@ -1,6 +1,7 @@
 # Copyright (c) 2025, Frappe and contributors
 # For license information, please see license.txt
 
+
 import frappe
 import frappe.utils
 from frappe.model.document import Document
@@ -31,7 +32,7 @@ class SupportAccess(Document):
 		resources: DF.Table[SupportAccessResource]
 		site_domains: DF.Check
 		site_release_group: DF.Check
-		status: DF.Literal["Pending", "Accepted", "Rejected"]
+		status: DF.Literal["Pending", "Accepted", "Rejected", "Forfeited", "Revoked"]
 		target_team: DF.Link | None
 	# end: auto-generated types
 
@@ -82,13 +83,22 @@ class SupportAccess(Document):
 		self.requested_by = self.requested_by or frappe.session.user
 		self.requested_team = self.requested_team or get_current_team()
 		self.set_expiry()
+		self.resolve_sites()
 		self.add_release_group()
 
 	def add_release_group(self):
+		"""
+		Add release group and bench as resources if `site_release_group` is checked.
+		"""
+
 		if not self.site_release_group:
 			return
+
+		# Only add release group and bench for new requests. Meaning, do not
+		# add them on updates.
 		if not self.is_new():
 			return
+
 		site = None
 		for resource in self.resources:
 			if resource.document_type == "Site":
@@ -96,15 +106,29 @@ class SupportAccess(Document):
 				break
 		if not site:
 			return
+
 		site = frappe.get_doc("Site", site)
 		release_group = frappe.get_doc("Release Group", site.group)
+
+		# Ensure release group and site belong to the same team.
 		if site.team != release_group.team:
 			return
+
+		# Add release group as a resource.
 		self.append(
 			"resources",
 			{
 				"document_type": "Release Group",
 				"document_name": release_group.name,
+			},
+		)
+
+		# Add bench as a resource.
+		self.append(
+			"resources",
+			{
+				"document_type": "Bench",
+				"document_name": site.bench,
 			},
 		)
 
@@ -114,25 +138,66 @@ class SupportAccess(Document):
 		if hours and doc_before and doc_before.status != self.status and self.status == "Accepted":
 			self.access_allowed_till = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=hours)
 
+	def resolve_sites(self):
+		for resource in self.resources:
+			if resource.document_type == "Site":
+				resource.document_name = self.resolve_site_name(resource.document_name)
+
+	def resolve_site_name(self, site) -> str:
+		try:
+			domain = frappe.get_doc("Site Domain", site)
+			return domain.site
+		except frappe.DoesNotExistError:
+			return site
+
 	def validate(self):
 		self.validate_status_change()
 		self.validate_expiry()
 		self.validate_target_team()
 
+	@property
+	def target_statuses(self) -> list[str]:
+		"""
+		Returns the possible target statuses for the current user.
+		"""
+		current_team = get_current_team()
+		if self.target_team == current_team:
+			return ["Accepted", "Rejected", "Revoked"]
+		if self.requested_team == current_team:
+			return ["Pending", "Forfeited"]
+		return []
+
+	def is_valid_status_transition(self, status_from: str, status_to: str) -> bool:
+		"""
+		Checks if status can be changed from `status_from` to `status_to`.
+		"""
+		return status_to in {
+			"Pending": ["Accepted", "Rejected"],
+			"Accepted": ["Revoked", "Forfeited"],
+			"Rejected": [],
+			"Forfeited": [],
+			"Revoked": [],
+		}.get(status_from, [])
+
 	def validate_status_change(self):
-		team = get_current_team()
+		status_changed = self.has_value_changed("status")
+		if not status_changed:
+			return
 		doc_before = self.get_doc_before_save()
-		status_changed = doc_before and doc_before.status != self.status
-		if status_changed and self.target_team != team:
-			frappe.throw("Only the target team can change the status")
-		if status_changed and doc_before.status != "Pending":
-			frappe.throw("Status can only be changed if it is Pending")
+		if not doc_before:
+			return
+		status_before = doc_before.status
+		status_after = self.status
+		if not self.is_valid_status_transition(status_before, status_after):
+			frappe.throw(f"Cannot change status from {status_before} to {status_after}")
+		if status_after not in self.target_statuses:
+			frappe.throw("You are not allowed to set this status")
 
 	def validate_expiry(self):
 		if self.access_expired:
 			frappe.throw("Access expiry must be in the future")
-		if self.status != "Accepted" and self.access_allowed_till:
-			frappe.throw("Access expiry can only be set if request is accepted")
+		if self.status == "Pending" and self.access_allowed_till:
+			frappe.throw("Pending requests cannot have access expiry")
 
 	def validate_target_team(self):
 		teams = set()
@@ -147,21 +212,28 @@ class SupportAccess(Document):
 		self.notify_on_request()
 
 	def on_update(self):
-		doc_before = self.get_doc_before_save()
-		if doc_before and doc_before.status != self.status:
-			self.notify_on_status_change()
+		self.notify_on_status_change()
 
 	def notify_on_status_change(self):
+		if not self.has_value_changed("status"):
+			return
+
 		title = f"Access Request {self.status}"
 		message = f"Your request for support access has been {self.status.lower()}."
+		recipient = self.requested_by
+
+		if self.status == "Forfeited":
+			message = "Support access has been forfieted."
+			recipient = self.target_team
 
 		frappe.sendmail(
 			subject=title,
 			message=message,
-			recipients=self.requested_by,
+			recipients=recipient,
 			template="access_request_update",
 			args={
 				"status": self.status,
+				"resources": self.resources,
 			},
 		)
 
@@ -196,8 +268,8 @@ class SupportAccess(Document):
 			recipients=team_email,
 			template="access_request",
 			args={
-				"requested_by": self.requested_by,
 				"reason": self.reason,
+				"resources": self.resources,
 			},
 		)
 

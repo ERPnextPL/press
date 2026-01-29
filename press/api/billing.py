@@ -19,6 +19,7 @@ from press.api.regional_payments.mpesa.utils import (
 	sanitize_mobile_number,
 	update_tax_id_or_phone_no,
 )
+from press.guards import role_guard
 from press.press.doctype.mpesa_setup.mpesa_connector import MpesaConnector
 from press.press.doctype.team.team import (
 	_enqueue_finalize_unpaid_invoices_for_team,
@@ -42,6 +43,7 @@ from press.utils.mpesa_utils import create_mpesa_request_log
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def get_publishable_key_and_setup_intent():
 	team = get_current_team()
 	return {
@@ -51,6 +53,7 @@ def get_publishable_key_and_setup_intent():
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def upcoming_invoice():
 	team = get_current_team(True)
 	invoice = team.get_upcoming_invoice()
@@ -68,29 +71,34 @@ def upcoming_invoice():
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def get_balance_credit():
 	team = get_current_team(True)
 	return team.get_balance()
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def past_invoices():
 	return get_current_team(True).get_past_invoices()
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def invoices_and_payments():
 	team = get_current_team(True)
 	return team.get_past_invoices()
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def refresh_invoice_link(invoice):
 	doc = frappe.get_doc("Invoice", invoice)
 	return doc.refresh_stripe_payment_link()
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def balances():
 	team = get_current_team()
 	has_bought_credits = frappe.db.get_all(
@@ -139,20 +147,20 @@ def balances():
 	return data
 
 
-def get_processed_balance_transactions(transactions: list[dict]):
+def get_processed_balance_transactions(transactions: list[dict]) -> list:
 	"""Cleans up transactions and adjusts ending balances accordingly"""
 
 	cleaned_up_transations = get_cleaned_up_transactions(transactions)
-	processed_balance_transactions = []
+	processed_balance_transactions: list[dict] = []
 	for bt in reversed(cleaned_up_transations):
 		if is_added_credits_bt(bt) and len(processed_balance_transactions) < 1:
 			processed_balance_transactions.append(bt)
 		elif is_added_credits_bt(bt):
-			bt.ending_balance += processed_balance_transactions[
-				-1
-			].ending_balance  # Adjust the ending balance
+			bt["ending_balance"] = bt.get("ending_balance", 0) + processed_balance_transactions[-1].get(
+				"ending_balance", 0
+			)  # Adjust the ending balance
 			processed_balance_transactions.append(bt)
-		elif bt.type == "Applied To Invoice":
+		elif bt.get("type") == "Applied To Invoice":
 			processed_balance_transactions.append(bt)
 
 	return list(reversed(processed_balance_transactions))
@@ -167,8 +175,8 @@ def get_cleaned_up_transactions(transactions: list[dict]):
 			cleaned_up_transations.append(bt)
 			continue
 
-		if bt.type == "Applied To Invoice" and not find(
-			cleaned_up_transations, lambda x: x.invoice == bt.invoice
+		if bt.get("type") == "Applied To Invoice" and not find(
+			cleaned_up_transations, lambda x: x.get("invoice") == bt.get("invoice")
 		):
 			cleaned_up_transations.append(bt)
 			continue
@@ -194,6 +202,7 @@ def is_added_credits_bt(bt):
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def details():
 	team = get_current_team(True)
 	address = None
@@ -218,6 +227,7 @@ def details():
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def fetch_invoice_items(invoice):
 	team = get_current_team()
 	if frappe.db.get_value("Invoice", invoice, "team") != team:
@@ -241,6 +251,7 @@ def fetch_invoice_items(invoice):
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def get_customer_details(team):
 	"""This method is called by frappe.io for creating Customer and Address"""
 	team_doc = frappe.db.get_value("Team", team, "*")
@@ -251,6 +262,7 @@ def get_customer_details(team):
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def create_payment_intent_for_micro_debit():
 	team = get_current_team(True)
 	stripe = get_stripe()
@@ -273,6 +285,7 @@ def create_payment_intent_for_micro_debit():
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def create_payment_intent_for_partnership_fees():
 	team = get_current_team(True)
 	press_settings = frappe.get_cached_doc("Press Settings")
@@ -300,6 +313,7 @@ def create_payment_intent_for_partnership_fees():
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def create_payment_intent_for_buying_credits(amount):
 	team = get_current_team(True)
 	metadata = {"payment_for": "prepaid_credits"}
@@ -329,6 +343,7 @@ def create_payment_intent_for_buying_credits(amount):
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def create_payment_intent_for_prepaid_app(amount, metadata):
 	stripe = get_stripe()
 	team = get_current_team(True)
@@ -386,18 +401,21 @@ def create_payment_intent_for_prepaid_app(amount, metadata):
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def get_payment_methods():
 	team = get_current_team()
 	return frappe.get_doc("Team", team).get_payment_methods()
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def set_as_default(name):
 	payment_method = frappe.get_doc("Stripe Payment Method", {"name": name, "team": get_current_team()})
 	payment_method.set_default()
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def remove_payment_method(name):
 	team = get_current_team()
 	payment_method_count = frappe.db.count("Stripe Payment Method", {"team": team})
@@ -411,6 +429,7 @@ def remove_payment_method(name):
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def finalize_invoices():
 	unsettled_invoices = frappe.get_all(
 		"Invoice",
@@ -424,6 +443,7 @@ def finalize_invoices():
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def unpaid_invoices():
 	team = get_current_team()
 	return frappe.db.get_all(
@@ -439,6 +459,7 @@ def unpaid_invoices():
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def get_unpaid_invoices():
 	team = get_current_team()
 	unpaid_invoices = frappe.db.get_all(
@@ -456,6 +477,7 @@ def get_unpaid_invoices():
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def change_payment_mode(mode):
 	team = get_current_team(get_doc=True)
 
@@ -473,6 +495,7 @@ def change_payment_mode(mode):
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def prepaid_credits_via_onboarding():
 	"""When prepaid credits are bought, the balance is not immediately reflected.
 	This method will check balance every second and then set payment_mode"""
@@ -492,6 +515,7 @@ def prepaid_credits_via_onboarding():
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def get_invoice_usage(invoice):
 	team = get_current_team()
 	# apply team filter for safety
@@ -504,6 +528,7 @@ def get_invoice_usage(invoice):
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def get_summary():
 	team = get_current_team()
 	invoices = frappe.get_all(
@@ -557,11 +582,13 @@ def get_grouped_invoice_items(invoices: list[str]) -> dict:
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def after_card_add():
 	clear_setup_intent()
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def setup_intent_success(setup_intent, address=None):
 	setup_intent = frappe._dict(setup_intent)
 
@@ -588,6 +615,7 @@ def setup_intent_success(setup_intent, address=None):
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def validate_gst(address, method=None):
 	if isinstance(address, dict):
 		address = frappe._dict(address)
@@ -613,6 +641,7 @@ def validate_gst(address, method=None):
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def get_latest_unpaid_invoice():
 	team = get_current_team()
 	unpaid_invoices = frappe.get_all(
@@ -643,18 +672,34 @@ def team_has_balance_for_invoice(prepaid_mode_invoice):
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def is_paypal_enabled() -> bool:
 	return frappe.db.get_single_value("Press Settings", "paypal_enabled")
 
 
 @frappe.whitelist()
-def create_razorpay_order(amount, type=None):
-	client = get_razorpay_client()
+@role_guard.api("billing")
+def create_razorpay_order(amount, transaction_type, doc_name=None) -> dict | None:
+	if not transaction_type:
+		frappe.throw(_("Transaction type is not set"))
+	if not amount or amount <= 0:
+		frappe.throw(_("Amount should be greater than zero"))
+
 	team = get_current_team(get_doc=True)
 
+	# transaction type validations
+	_validate_razorpay_order_type(transaction_type, amount, doc_name, team.currency)
+
+	# GST for INR transactions
+	gst_amount = 0
 	if team.currency == "INR":
 		gst_amount = amount * frappe.db.get_single_value("Press Settings", "gst_percentage")
 		amount += gst_amount
+
+	# normalize type for payment record
+	payment_record_type = (
+		"Prepaid Credits" if transaction_type in ["Invoice", "Purchase Plan"] else transaction_type
+	)
 
 	amount = round(amount, 2)
 	data = {
@@ -663,15 +708,21 @@ def create_razorpay_order(amount, type=None):
 		"notes": {
 			"Description": "Order for Frappe Cloud Prepaid Credits",
 			"Team (Frappe Cloud ID)": team.name,
-			"gst": gst_amount if team.currency == "INR" else 0,
+			"gst": gst_amount,
+			"Type": payment_record_type,
 		},
 	}
-	if type and type == "Partnership Fee":
-		data.get("notes").update({"Type": type})
+
+	client = get_razorpay_client()
 	order = client.order.create(data=data)
 
 	payment_record = frappe.get_doc(
-		{"doctype": "Razorpay Payment Record", "order_id": order.get("id"), "team": team.name, "type": type}
+		{
+			"doctype": "Razorpay Payment Record",
+			"order_id": order.get("id"),
+			"team": team.name,
+			"type": payment_record_type,
+		}
 	).insert(ignore_permissions=True)
 
 	return {
@@ -681,7 +732,52 @@ def create_razorpay_order(amount, type=None):
 	}
 
 
+def _validate_razorpay_order_type(transaction_type, amount, doc_name, currency):
+	if transaction_type == "Prepaid Credits":
+		_validate_prepaid_credits(amount, currency)
+	elif transaction_type == "Purchase Plan":
+		_validate_purchase_plan(amount, doc_name, currency)
+	elif transaction_type == "Invoice":
+		_validate_invoice_payment(amount, doc_name, currency)
+
+
+def _validate_prepaid_credits(amount, currency):
+	minimum_amount = 100 if currency == "INR" else 5
+	if amount < minimum_amount:
+		currency_symbol = "₹" if currency == "INR" else "$"
+		frappe.throw(_("Amount should be at least {0}{1}").format(currency_symbol, minimum_amount))
+
+
+def _validate_purchase_plan(amount, doc_name, currency):
+	if not doc_name or not frappe.db.exists("Plan", doc_name):
+		frappe.throw(_("Plan {0} does not exist").format(doc_name or ""))
+
+	price_field = "price_inr" if currency == "INR" else "price_usd"
+	plan_amount = frappe.db.get_value("Plan", doc_name, price_field)
+
+	if amount < plan_amount:
+		currency_symbol = "₹" if currency == "INR" else "$"
+		frappe.throw(
+			_("Amount should not be less than plan amount of {0}{1}").format(currency_symbol, plan_amount)
+		)
+
+
+def _validate_invoice_payment(amount, doc_name, currency):
+	if not doc_name or not frappe.db.exists("Invoice", doc_name):
+		frappe.throw(_("Invoice {0} does not exist").format(doc_name or ""))
+
+	invoice_amount = frappe.db.get_value("Invoice", doc_name, "amount_due_with_tax")
+	if amount < invoice_amount:
+		currency_symbol = "₹" if currency == "INR" else "$"
+		frappe.throw(
+			_("Amount should not be less than invoice amount of {0}{1}").format(
+				currency_symbol, invoice_amount
+			)
+		)
+
+
 @frappe.whitelist()
+@role_guard.api("billing")
 def handle_razorpay_payment_success(response):
 	client = get_razorpay_client()
 	client.utility.verify_payment_signature(response)
@@ -702,6 +798,7 @@ def handle_razorpay_payment_success(response):
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def handle_razorpay_payment_failed(response):
 	payment_record = frappe.get_doc(
 		"Razorpay Payment Record",
@@ -715,20 +812,49 @@ def handle_razorpay_payment_failed(response):
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def total_unpaid_amount():
 	team = get_current_team(get_doc=True)
 	balance = team.get_balance()
 	negative_balance = -1 * balance if balance < 0 else 0
 
+
+	try:
+		return (
+			frappe.get_all(
+				"Invoice",
+				{"status": "Unpaid", "team": team.name, "type": "Subscription", "docstatus": ("!=", 2)},
+				["sum(`amount_due`) as total"],
+				pluck="total",
+			)[0]
+			or 0
+		) + negative_balance
+	except:  # noqa E722
+		return (
+			frappe.get_all(
+				"Invoice",
+				{"status": "Unpaid", "team": team.name, "type": "Subscription", "docstatus": ("!=", 2)},
+				[{"SUM": "amount_due", "as": "total"}],
+				pluck="total",
+			)[0]
+			or 0
+		) + negative_balance
+
+
+@frappe.whitelist()
+@role_guard.api("billing")
+def get_current_billing_amount():
+	team = get_current_team(get_doc=True)
+	due_date = frappe.utils.get_last_day(frappe.utils.getdate())
+
 	return (
-		frappe.get_all(
+		frappe.get_value(
 			"Invoice",
-			{"status": "Unpaid", "team": team.name, "type": "Subscription", "docstatus": ("!=", 2)},
-			["sum(amount_due) as total"],
-			pluck="total",
-		)[0]
+			{"team": team.name, "due_date": due_date, "docstatus": 0},
+			"total",
+		)
 		or 0
-	) + negative_balance
+	)
 
 
 # Mpesa integrations, mpesa express
@@ -847,6 +973,7 @@ def handle_transaction_result(transaction_response, integration_request):
 
 
 @frappe.whitelist()
+@role_guard.api("billing")
 def request_for_payment(**kwargs):
 	"""request for payments"""
 	team = get_current_team()
@@ -902,7 +1029,13 @@ def create_mpesa_payment_record(transaction_response):
 	}
 	if frappe.db.exists("Mpesa Payment Record", {"transaction_id": transaction_id}):
 		return
-	mpesa_invoice, invoice_name = create_invoice_partner_site(data, gateway_name)
+
+	try:
+		mpesa_invoice, invoice_name = create_invoice_partner_site(data, gateway_name)
+	except Exception as e:
+		frappe.log_error(f"Failed to create mpesa invoice on partner site: {e}")
+		mpesa_invoice = invoice_name = None
+
 	try:
 		payment_record = frappe.get_doc(
 			{
@@ -995,3 +1128,247 @@ def parse_datetime(date):
 	from datetime import datetime
 
 	return datetime.strptime(str(date), "%Y%m%d%H%M%S")
+
+
+@frappe.whitelist()
+@role_guard.api("billing")
+def billing_forecast():
+	"""
+	Get billing forecast and breakdown data for the current month.
+	"""
+	team = get_current_team(True)
+
+	# Get dates and related info
+	date_info = _get_date_context()
+
+	# Get last and current month invoice currency and totals
+	invoice_data = _get_invoice_data(team.name, date_info)
+
+	# Calculate month-end forecast amount and per-service breakdown of forecasts
+	forecast_data = _calculate_forecast_data(team.name, team.currency, date_info)
+
+	# Get usage breakdowns for last month, current month-to-date and forecasted month-end
+	usage_breakdown = _get_usage_data_breakdown(invoice_data, forecast_data, date_info["days_remaining"])
+
+	# Calculate month-over-month and month-to-date % changes
+	changes = _calculate_percentage_changes(
+		team.name, invoice_data, forecast_data["forecasted_total"], date_info
+	)
+
+	return {
+		"current_month_to_date_cost": invoice_data["current_month_total"],
+		"forecasted_month_end": forecast_data["forecasted_total"],
+		"last_month_cost": invoice_data["last_month_total"],
+		"usage_breakdown": usage_breakdown,
+		"month_over_month_change": changes["month_over_month"],
+		"mtd_change": changes["mtd_change"],
+		"currency": team.currency,
+	}
+
+
+def _get_date_context():
+	"""Get all date-related data in one place for billing forecast."""
+	from frappe.utils import add_days, add_months, get_last_day, getdate
+
+	current_date = getdate()
+	current_month_start = current_date.replace(day=1)
+	current_month_end = get_last_day(current_date)
+	last_month_end = add_days(current_month_start, -1)
+	last_month_start = last_month_end.replace(day=1)
+	last_month_same_date = add_months(current_date, -1)
+
+	days_in_month = (current_month_end - current_month_start).days + 1
+	days_passed = (current_date - current_month_start).days + 1
+	days_remaining = max(days_in_month - days_passed, 0)
+
+	return {
+		"current_date": current_date,
+		"current_month_start": current_month_start,
+		"current_month_end": current_month_end,
+		"last_month_start": last_month_start,
+		"last_month_end": last_month_end,
+		"last_month_same_date": last_month_same_date,
+		"days_in_month": days_in_month,
+		"days_passed": days_passed,
+		"days_remaining": days_remaining,
+	}
+
+
+def _get_invoice_data(team_name: str, date_info: dict):
+	"""Get current and last month invoice data."""
+	current_invoice = _get_invoice_based_on_due_date(team_name, date_info["current_month_end"])
+	last_month_invoice = _get_invoice_based_on_due_date(team_name, date_info["last_month_end"])
+
+	return {
+		"current_invoice": current_invoice,
+		"last_month_invoice": last_month_invoice,
+		"current_month_total": current_invoice.total if current_invoice else 0,
+		"last_month_total": last_month_invoice.total if last_month_invoice else 0,
+	}
+
+
+def _get_invoice_based_on_due_date(team_name, due_date):
+	return frappe.db.get_value(
+		"Invoice",
+		{"team": team_name, "due_date": due_date, "docstatus": ("!=", 2)},
+		["name", "total", "currency"],
+		as_dict=True,
+	)
+
+
+def _calculate_forecast_data(
+	team: str, currency: str, date_info: dict
+) -> dict[str, float | dict[str, float]]:
+	"""Calculate monthly total cost of all active subscriptions and forecasted cost for remaining days in the month"""
+	from frappe.utils import flt
+
+	subscriptions = _get_active_subscriptions(team)
+	days_remaining = date_info["days_remaining"]
+	days_in_month = date_info["days_in_month"]
+
+	forecasted_month_end = 0
+	per_service_forecast: dict[str, float] = {}  # Forecasted remaining cost per service
+
+	price_field = "price_usd" if currency == "USD" else "price_inr"
+
+	for sub in subscriptions:
+		plan = frappe.db.get_value(sub.plan_type, sub.plan, [price_field], as_dict=True)
+		if not plan:
+			continue
+
+		price = plan.get(price_field, 0)
+		if price > 0:
+			forecasted_month_end += price
+
+			# Forecasted remaining cost for this service
+			if days_remaining > 0:
+				remaining_cost = (price / days_in_month) * days_remaining
+				per_service_forecast[sub.document_type] = flt(
+					per_service_forecast.get(sub.document_type, 0) + remaining_cost
+				)
+
+	return {
+		"forecasted_total": forecasted_month_end,
+		"subscription_forecast": per_service_forecast,
+	}
+
+
+def _get_active_subscriptions(team: str):
+	"""Get all active subscriptions for a team."""
+	Subscription = frappe.qb.DocType("Subscription")
+
+	return (
+		frappe.qb.from_(Subscription)
+		.select(Subscription.document_type, Subscription.plan_type, Subscription.plan)
+		.where((Subscription.team == team) & (Subscription.enabled == 1))
+		.run(as_dict=True)
+	)
+
+
+def _get_usage_data_breakdown(invoice_data: dict, forecast_data: dict, days_remaining: int = 0):
+	"""Get usage breakdown grouped by document_type."""
+	current_breakdown = (
+		_get_usage_breakdown(invoice_data["current_invoice"].name) if invoice_data["current_invoice"] else {}
+	)
+	last_month_breakdown = (
+		_get_usage_breakdown(invoice_data["last_month_invoice"].name)
+		if invoice_data["last_month_invoice"]
+		else {}
+	)
+	forecasted_breakdown = _get_forecasted_usage_breakdown(
+		current_breakdown, forecast_data["subscription_forecast"], days_remaining
+	)
+
+	return {
+		"month_to_date_usage_breakdown": current_breakdown,
+		"last_month_usage_breakdown": last_month_breakdown,
+		"forecasted_usage_breakdown": forecasted_breakdown,
+	}
+
+
+def _get_usage_breakdown(invoice: str) -> dict[str, float]:
+	if not invoice:
+		return {}
+
+	invoice_doc = frappe.get_doc("Invoice", invoice)
+	service_costs: dict[str, float] = {}
+
+	for item in invoice_doc.items:
+		service = item.document_type
+		service_costs[service] = service_costs.get(service, 0.0) + float(item.amount)
+
+	return service_costs
+
+
+def _get_forecasted_usage_breakdown(
+	current_usage: dict, subscription_forecast: dict, days_remaining: int
+) -> dict:
+	# Consider usage so far as well as active subscriptions to forecast month-end usage breakdown
+	if not subscription_forecast and not current_usage:
+		return {}
+
+	if days_remaining == 0:  # if end of month, use actual usage
+		return current_usage
+
+	forecasted_usage_breakdown = {}
+	for service in set(list(current_usage.keys()) + list(subscription_forecast.keys())):
+		forecasted_usage_breakdown[service] = current_usage.get(service, 0) + subscription_forecast.get(
+			service, 0
+		)
+
+	return forecasted_usage_breakdown
+
+
+def _calculate_percentage_changes(team_name: str, invoice_data: dict, forecasted_total, date_info: dict):
+	"""Calculate month-over-month and MTD changes."""
+	from frappe.utils import flt
+
+	# Month-over-month change
+	month_over_month_change = 0
+	last_month_total = invoice_data["last_month_total"]
+	if last_month_total > 0:
+		month_over_month_change = (forecasted_total - last_month_total) / last_month_total * 100
+
+	# Month-to-date change
+	mtd_change = _calculate_mtd_change(
+		team_name,
+		invoice_data["current_month_total"],
+		date_info["last_month_start"],
+		date_info["last_month_same_date"],
+	)
+
+	return {
+		"month_over_month": flt(month_over_month_change, 2),
+		"mtd_change": flt(mtd_change, 2),
+	}
+
+
+def _calculate_mtd_change(team: str, current_mtd_cost: float, last_month_start, last_month_same_date):
+	from frappe.utils import flt
+
+	last_mtd_total = _get_usage_records_total_for_date_range(team, last_month_start, last_month_same_date)
+
+	mtd_change = 0
+	if last_mtd_total > 0:
+		mtd_change = ((current_mtd_cost - last_mtd_total) / last_mtd_total) * 100
+	return flt(mtd_change, 2)
+
+
+def _get_usage_records_total_for_date_range(team: str, start_date, end_date):
+	"""Get total amount from Usage Records for a team in a date range."""
+	from frappe.query_builder.functions import Sum
+
+	UsageRecord = frappe.qb.DocType("Usage Record")
+	total_amount = (
+		frappe.qb.from_(UsageRecord)
+		.select(Sum(UsageRecord.amount))
+		.where(
+			(UsageRecord.team == team)
+			& (UsageRecord.date >= start_date)
+			& (UsageRecord.date <= end_date)
+			& (UsageRecord.docstatus == 1)
+		)
+		.run(pluck=True)
+	)
+
+	return total_amount[0] or 0

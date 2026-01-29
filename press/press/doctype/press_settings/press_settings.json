@@ -19,12 +19,15 @@
   "micro_debit_charge_inr",
   "column_break_wrqp",
   "usage_record_creation_batch_size",
+  "default_server_plan_type",
   "invoicing_section",
   "invoicing_column",
   "gst_percentage",
   "npo_discount",
+  "autoscale_discount",
   "column_break_qfwx",
   "print_format",
+  "ic_key",
   "stripe_settings_section",
   "stripe_publishable_key",
   "stripe_secret_key",
@@ -84,6 +87,13 @@
   "docker_registry_username",
   "docker_registry_password",
   "docker_s3_secret_key",
+  "asset_store_section",
+  "asset_store_access_key",
+  "asset_store_secret_access_key",
+  "asset_store_endpoint",
+  "asset_store_region",
+  "asset_store_bucket_name",
+  "use_asset_store",
   "docker_build_section",
   "suspend_builds",
   "clone_directory",
@@ -146,6 +156,7 @@
   "github_app_public_link",
   "github_webhook_secret",
   "github_access_token",
+  "deploy_marker",
   "section_break_41",
   "column_break_tcmy",
   "column_break_edst",
@@ -154,8 +165,6 @@
   "aws_access_key_id",
   "column_break_agig",
   "aws_secret_access_key",
-  "hetzner_section",
-  "hetzner_api_token",
   "twilio_section",
   "twilio_account_sid",
   "twilio_api_key_sid",
@@ -212,13 +221,18 @@
   "email_recipients",
   "section_break_nloq",
   "servers_using_alternative_http_port_for_communication",
+  "auto_scale_section",
+  "shared_directory",
+  "cool_off_period",
   "feature_flags_tab",
   "verify_cards_with_micro_charge",
   "enable_google_oauth",
   "realtime_job_updates",
+  "disable_agent_job_deduplication",
+  "disable_binlog_indexer_service",
   "column_break_rdlr",
   "disable_auto_retry",
-  "disable_agent_job_deduplication",
+  "disallow_disposable_emails",
   "enable_email_pre_verification",
   "execute_incident_action",
   "enable_server_snapshot_recovery",
@@ -230,12 +244,21 @@
   "partnership_fee_usd",
   "column_break_yxrj",
   "partnership_fee_inr",
+  "section_break_dhzi",
+  "drive_resource_link",
+  "frappe_school_authentication_section",
+  "school_url",
+  "school_api_key",
+  "column_break_uxxz",
+  "school_api_secret",
   "hybrid_server_tab",
   "hybrid_cluster",
   "hybrid_domain",
   "tls_renewal_queue_size",
   "code_spaces_tab",
-  "spaces_domain"
+  "spaces_domain",
+  "security_tab",
+  "wazuh_server"
  ],
  "fields": [
   {
@@ -825,6 +848,7 @@
    "read_only": 1
   },
   {
+   "default": "fc-deploy",
    "fieldname": "column_break_36",
    "fieldtype": "Column Break"
   },
@@ -1265,16 +1289,6 @@
    "label": "Usage Record Creation Batch Size"
   },
   {
-   "fieldname": "hetzner_section",
-   "fieldtype": "Section Break",
-   "label": "Hetzner"
-  },
-  {
-   "fieldname": "hetzner_api_token",
-   "fieldtype": "Password",
-   "label": "Hetzner API Token"
-  },
-  {
    "fieldname": "press_trial_plan",
    "fieldtype": "Link",
    "label": "Press Trial Plan",
@@ -1486,11 +1500,144 @@
    "fieldname": "set_redis_password",
    "fieldtype": "Check",
    "label": "Set Redis Password"
+  },
+  {
+   "default": "1",
+   "fieldname": "disallow_disposable_emails",
+   "fieldtype": "Check",
+   "label": "Disallow disposable emails"
+  },
+  {
+   "fieldname": "drive_resource_link",
+   "fieldtype": "Data",
+   "label": "Drive Resource Link"
+  },
+  {
+   "fieldname": "ic_key",
+   "fieldtype": "Password",
+   "label": "IC Key"
+  },
+  {
+   "fieldname": "section_break_dhzi",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "auto_scale_section",
+   "fieldtype": "Section Break",
+   "label": "Auto Scale"
+  },
+  {
+   "default": "/home/frappe/shared",
+   "fieldname": "shared_directory",
+   "fieldtype": "Data",
+   "label": "Shared Directory"
+  },
+  {
+   "default": "600",
+   "description": "Time between two autoscale events (up scale or down scale)",
+   "fieldname": "cool_off_period",
+   "fieldtype": "Int",
+   "label": "Cool off period"
+  },
+  {
+   "fieldname": "deploy_marker",
+   "fieldtype": "Data",
+   "label": "Deploy Marker",
+   "options": "If found in commit message deploy will be triggered"
+  },
+  {
+   "fieldname": "security_tab",
+   "fieldtype": "Tab Break",
+   "label": "Security"
+  },
+  {
+   "fieldname": "wazuh_server",
+   "fieldtype": "Data",
+   "label": "Wazuh Server"
+  },
+  {
+   "fieldname": "autoscale_discount",
+   "fieldtype": "Float",
+   "label": "Autoscale Discount"
+  },
+  {
+   "default": "1",
+   "fieldname": "disable_binlog_indexer_service",
+   "fieldtype": "Check",
+   "label": "Disable Binlog Indexer Service"
+  },
+  {
+   "fieldname": "default_server_plan_type",
+   "fieldtype": "Link",
+   "label": "Default Server Plan Type",
+   "options": "Server Plan Type"
+  },
+  {
+   "fieldname": "frappe_school_authentication_section",
+   "fieldtype": "Section Break",
+   "label": "Frappe School Authentication"
+  },
+  {
+   "fieldname": "school_url",
+   "fieldtype": "Data",
+   "label": "School URL"
+  },
+  {
+   "fieldname": "school_api_key",
+   "fieldtype": "Data",
+   "label": "School API Key"
+  },
+  {
+   "fieldname": "column_break_uxxz",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "school_api_secret",
+   "fieldtype": "Password",
+   "label": "School API Secret"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "asset_store_section",
+   "fieldtype": "Section Break",
+   "label": "Asset Store"
+  },
+  {
+   "default": "0",
+   "description": "Will only use this asset storage backend if checked.",
+   "fieldname": "use_asset_store",
+   "fieldtype": "Check",
+   "label": "Use Asset Store"
+  },
+  {
+   "fieldname": "asset_store_access_key",
+   "fieldtype": "Data",
+   "label": "Asset Store Access Key"
+  },
+  {
+   "fieldname": "asset_store_secret_access_key",
+   "fieldtype": "Password",
+   "label": "Asset Store Secret Access Key"
+  },
+  {
+   "fieldname": "asset_store_endpoint",
+   "fieldtype": "Data",
+   "label": "Asset Store Endpoint"
+  },
+  {
+   "fieldname": "asset_store_bucket_name",
+   "fieldtype": "Data",
+   "label": "Asset Store Bucket Name "
+  },
+  {
+   "fieldname": "asset_store_region",
+   "fieldtype": "Data",
+   "label": "Asset Store Region"
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2025-11-03 10:28:59.626610",
+ "modified": "2026-01-17 11:49:01.799269",
  "modified_by": "Administrator",
  "module": "Press",
  "name": "Press Settings",

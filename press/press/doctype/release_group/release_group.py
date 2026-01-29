@@ -24,6 +24,7 @@ from press.access.decorators import action_guard
 from press.agent import Agent
 from press.api.client import dashboard_whitelist
 from press.exceptions import ImageNotFoundInRegistry, InsufficientSpaceOnServer, VolumeResizeLimitError
+from press.guards import role_guard
 from press.overrides import get_permission_query_conditions_for_doctype
 from press.press.doctype.app.app import new_app
 from press.press.doctype.app_source.app_source import AppSource, create_app_source
@@ -47,12 +48,12 @@ if TYPE_CHECKING:
 	from press.press.doctype.user_ssh_key.user_ssh_key import UserSSHKey
 
 DEFAULT_DEPENDENCIES = [
-        {"dependency": "NVM_VERSION", "version": "0.36.0"},
-        {"dependency": "NODE_VERSION", "version": "14.19.0"},
-        {"dependency": "PYTHON_VERSION", "version": "3.7"},
-        {"dependency": "WKHTMLTOPDF_VERSION", "version": "0.12.5"},
-        {"dependency": "BENCH_VERSION", "version": "5.25.1"},
-        {"dependency": "PIP_VERSION", "version": "25.3"},
+	{"dependency": "NVM_VERSION", "version": "0.36.0"},
+	{"dependency": "NODE_VERSION", "version": "14.19.0"},
+	{"dependency": "PYTHON_VERSION", "version": "3.7"},
+	{"dependency": "WKHTMLTOPDF_VERSION", "version": "0.12.5"},
+	{"dependency": "BENCH_VERSION", "version": "5.25.1"},
+	{"dependency": "PIP_VERSION", "version": "25.3"},
 ]
 
 SUPPORTED_WKHTMLTOPDF_VERSIONS = ["0.12.5", "0.12.6"]
@@ -227,6 +228,7 @@ class ReleaseGroup(Document, TagHelpers):
 			},
 		]
 
+	@role_guard.action()
 	def validate(self):
 		self.validate_title()
 		self.validate_frappe_app()
@@ -280,13 +282,6 @@ class ReleaseGroup(Document, TagHelpers):
 		self.set_default_delta_builds_flags()
 		self.setup_default_feature_flags()
 
-	def after_insert(self):
-		from press.press.doctype.press_role.press_role import (
-			add_permission_for_newly_created_doc,
-		)
-
-		add_permission_for_newly_created_doc(self)
-
 	def on_update(self):
 		old_doc = self.get_doc_before_save()
 		if self.flags.in_insert or self.is_new() or not old_doc:
@@ -296,8 +291,6 @@ class ReleaseGroup(Document, TagHelpers):
 			if row[0] == "dependencies":
 				self.db_set("last_dependency_update", frappe.utils.now_datetime())
 				break
-		if self.has_value_changed("team"):
-			frappe.db.delete("Press Role Permission", {"release_group": self.name})
 
 	def on_trash(self):
 		candidates = frappe.get_all("Deploy Candidate", {"group": self.name})
@@ -598,12 +591,18 @@ class ReleaseGroup(Document, TagHelpers):
 		return required_arm_build, required_intel_build
 
 	def get_redis_password(self) -> str:
-		"""Get redis password create and update password if not present"""
+		"""Get redis password create and update password if not present
+		Ignore validation while setting redis password to allow older RGs
+		to be password protected.
+		"""
 		try:
 			return self.get_password("redis_password")
-		except frappe.AuthenticationError:
+		except (frappe.AuthenticationError, frappe.ValidationError):
 			self.redis_password = frappe.generate_hash(length=32)
-			self.save(ignore_permissions=True)
+			self.flags.ignore_validate = 1
+			self._save_passwords()
+			self.save()
+			frappe.db.commit()  # Safe password regardless
 			return self.get_password("redis_password")
 
 	@frappe.whitelist()
@@ -644,6 +643,7 @@ class ReleaseGroup(Document, TagHelpers):
 			return Agent(server.name).get(f"server/image-size/{last_deployed_bench.build}").get("size")
 		except Exception as e:
 			log_error("Failed to fetch last image size", data=e)
+			return None
 
 	def check_app_server_storage(self):
 		"""
@@ -677,6 +677,35 @@ class ReleaseGroup(Document, TagHelpers):
 					server, mountpoint, required_size=last_image_size - free_space
 				)
 
+	def check_auto_scales(self) -> None:
+		"""Check for servers that are scaled up in the release group and throw if any"""
+		has_scaled_up_servers = frappe.db.get_value(
+			"Server",
+			{
+				"name": ("IN", [server.server for server in self.servers]),
+				"scaled_up": True,
+			},
+		)
+		if has_scaled_up_servers:
+			frappe.throw(
+				"Server(s) are scaled up currently and no deployment can run on them as of now."
+				"Please scale down all the server before deploying."
+			)
+
+		has_running_auto_scales = frappe.db.get_value(
+			"Auto Scale Record",
+			{
+				"primary_server": ("IN", [server.server for server in self.servers]),
+				"status": ("IN", ["Running", "Pending"]),
+			},
+		)
+
+		if has_running_auto_scales:
+			frappe.throw(
+				"Server(s) are triggered to auto scale and no deployment can run on them as of now."
+				"Please scale down all the server before deploying."
+			)
+
 	@frappe.whitelist()
 	def create_deploy_candidate(
 		self,
@@ -687,6 +716,8 @@ class ReleaseGroup(Document, TagHelpers):
 			return None
 
 		self.check_app_server_storage()
+		self.check_auto_scales()
+
 		apps = self.get_apps_to_update(apps_to_update)
 		if apps_to_update is None:
 			self.validate_dc_apps_against_rg(apps)
@@ -716,6 +747,7 @@ class ReleaseGroup(Document, TagHelpers):
 				"environment_variables": environment_variables,
 				"requires_arm_build": requires_arm_build,
 				"requires_intel_build": requires_intel_build,
+				"build_token": frappe.generate_hash(length=10),
 			}
 		)
 
@@ -1078,7 +1110,7 @@ class ReleaseGroup(Document, TagHelpers):
 		return "Active" if active_benches else "Awaiting Deploy"
 
 	@cached_property
-	def last_dc_info(self) -> "LastDeployInfo | None":
+	def last_dc_info(self) -> LastDeployInfo | None:
 		DeployCandidateBuild = frappe.qb.DocType("Deploy Candidate Build")
 
 		query = (
@@ -1096,8 +1128,10 @@ class ReleaseGroup(Document, TagHelpers):
 		return None
 
 	@cached_property
-	def last_benches_info(self) -> "list[LastDeployInfo]":
-		if not (name := (self.last_dc_info or {}).get("name")):
+	def last_benches_info(self) -> list[LastDeployInfo]:
+		last_dc_info: LastDeployInfo | dict = self.last_dc_info or {}
+		name: str | None = last_dc_info.get("name")
+		if not name:
 			return []
 
 		Bench = frappe.qb.DocType("Bench")
@@ -1453,7 +1487,7 @@ class ReleaseGroup(Document, TagHelpers):
 			self.save()
 
 			return create_platform_build_and_deploy(
-				deploy_candidate=last_candidate_build.candidate.name,
+				deploy_candidate=last_candidate_build.candidate.name,  # type: ignore
 				server=server,
 				platform=server_platform,
 			)
@@ -1483,10 +1517,12 @@ class ReleaseGroup(Document, TagHelpers):
 
 	@frappe.whitelist()
 	def update_benches_config(self):
+		from press.press.doctype.bench.bench import Bench
+
 		"""Update benches config for all benches in the release group"""
 		benches = frappe.get_all("Bench", "name", {"group": self.name, "status": "Active"})
 		for bench in benches:
-			frappe.get_doc("Bench", bench.name).update_bench_config(force=True)
+			Bench("Bench", bench.name).update_bench_config(force=True)
 
 	@dashboard_whitelist()
 	def add_app(self, app, is_update: bool = False):
@@ -1536,8 +1572,6 @@ class ReleaseGroup(Document, TagHelpers):
 		self.title = append_number_if_name_exists("Release Group", new_name, "title", separator=".")
 		self.enabled = 0
 		self.save()
-
-		frappe.db.delete("Press Role Permission", {"release_group": self.name})
 
 	@dashboard_whitelist()
 	def delete(self) -> None:
@@ -1796,3 +1830,22 @@ def add_public_servers_to_public_groups():
 			rg.reload()
 			rg.append("servers", {"server": server, "default": False})
 			rg.save()
+
+
+def get_restricted_server_names():
+	restricted_release_group_names = frappe.db.get_all(
+		"Site Plan Release Group",
+		pluck="release_group",
+		filters={"parenttype": "Site Plan", "parentfield": "release_groups"},
+		distinct=True,
+	)
+	return frappe.db.get_all(
+		"Release Group Server",
+		pluck="server",
+		filters={
+			"parenttype": "Release Group",
+			"parentfield": "servers",
+			"parent": ("in", restricted_release_group_names),
+		},
+		distinct=True,
+	)

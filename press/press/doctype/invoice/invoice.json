@@ -23,6 +23,7 @@
   "period_end",
   "due_date",
   "amended_from",
+  "budget_alert_sent",
   "section_break_8",
   "items",
   "discounts_section",
@@ -178,7 +179,8 @@
    "fieldname": "stripe_invoice_id",
    "fieldtype": "Data",
    "label": "Stripe Invoice ID",
-   "no_copy": 1
+   "no_copy": 1,
+   "search_index": 1
   },
   {
    "allow_on_submit": 1,
@@ -515,6 +517,13 @@
    "fieldname": "mpesa_invoice_pdf",
    "fieldtype": "Attach",
    "label": "Mpesa Invoice PDF"
+  },
+  {
+   "default": "0",
+   "fieldname": "budget_alert_sent",
+   "fieldtype": "Check",
+   "hidden": 1,
+   "label": "Budget Alert Sent"
   }
  ],
  "grid_page_length": 50,
@@ -541,7 +550,7 @@
    "link_fieldname": "invoice"
   }
  ],
- "modified": "2025-09-30 19:07:43.931883",
+ "modified": "2026-01-05 21:33:27.298700",
  "modified_by": "Administrator",
  "module": "Press",
  "name": "Invoice",

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import frappe
 import frappe.utils
@@ -11,6 +12,7 @@ from frappe.model.document import Document
 from frappe.utils.data import get_url
 
 from press.utils import log_error
+from press.utils.jobs import has_job_timeout_exceeded
 from press.utils.unique_name_generator import generate as generate_random_name
 
 
@@ -104,8 +106,7 @@ class ProductTrial(Document):
 		standby_site = self.get_standby_site(cluster, account_request)
 
 		trial_end_date = frappe.utils.add_days(None, self.trial_days or 14)
-		site = None
-		agent_job_name = None
+		agent_job_name: str | None = None
 		plan = self.trial_plan
 
 		if standby_site:
@@ -229,12 +230,13 @@ class ProductTrial(Document):
 			"Cluster", {"name": ("in", clusters), "public": 1}, order_by="name asc", pluck="name"
 		)
 
+	@staticmethod
 	def get_preferred_site(filters) -> str | None:
 		sites = frappe.db.get_all(
 			"Site",
 			filters=filters,
 			pluck="name",
-			order_by="creation asc",
+			order_by="status,standby_for,creation asc",
 			limit=10,
 		)
 		if not sites:
@@ -315,7 +317,7 @@ class ProductTrial(Document):
 			for rule in self.hybrid_pool_rules:
 				self._create_standby_sites(cluster, rule)
 
-	def _create_standby_sites(self, cluster: str, rule: dict | None = None):
+	def _create_standby_sites(self, cluster: str, rule: HybridPoolItem | None = None):
 		if rule and rule.preferred_cluster and rule.preferred_cluster != cluster:
 			return
 
@@ -332,7 +334,7 @@ class ProductTrial(Document):
 			self.create_standby_site(cluster, rule)
 			frappe.db.commit()
 
-	def create_standby_site(self, cluster: str, rule: dict | None = None):
+	def create_standby_site(self, cluster: str, rule: HybridPoolItem | None = None):
 		from frappe.core.utils import find
 
 		administrator = frappe.db.get_value("Team", {"user": "Administrator"}, "name")
@@ -366,29 +368,28 @@ class ProductTrial(Document):
 		site.insert(ignore_permissions=True)
 
 	def get_standby_sites_count(self, cluster: str, hybrid_for: str | None = None):
-		active_standby_sites = frappe.db.count(
-			"Site",
-			{
-				"cluster": cluster,
-				"is_standby": 1,
-				"standby_for_product": self.name,
-				"status": "Active",
-				"hybrid_for": hybrid_for,
-			},
+		one_hour_ago = frappe.utils.add_to_date(None, hours=-1)
+		Site = frappe.qb.DocType("Site")
+		query = (
+			frappe.qb.from_(Site)
+			.select(Site.name)
+			.distinct()
+			.where(
+				(Site.cluster == cluster) & (Site.is_standby == 1) & (Site.standby_for_product == self.name)
+			)
 		)
-		# sites that are created in the last hour
-		recent_standby_sites = frappe.db.count(
-			"Site",
-			{
-				"cluster": cluster,
-				"is_standby": 1,
-				"standby_for_product": self.name,
-				"status": ("not in", ["Archived", "Suspended"]),
-				"creation": (">", frappe.utils.add_to_date(None, hours=-1)),
-				"hybrid_for": hybrid_for,
-			},
+
+		if hybrid_for is None:
+			query = query.where(Site.hybrid_for.isnull())
+		else:
+			query = query.where(Site.hybrid_for == hybrid_for)
+
+		query = query.where(
+			(Site.status == "Active")
+			| ((Site.creation > one_hour_ago) & (Site.status.notin(["Archived", "Suspended"])))
 		)
-		return active_standby_sites + recent_standby_sites
+		standby_sites = query.run(pluck=True)
+		return len(standby_sites)
 
 	def get_unique_site_name(self):
 		subdomain = f"{self.name}-{generate_random_name(segment_length=3, num_segments=2)}"
@@ -409,6 +410,7 @@ class ProductTrial(Document):
 		servers = (
 			frappe.qb.from_(ReleaseGroupServer)
 			.select(ReleaseGroupServer.server)
+			.distinct()
 			.where(ReleaseGroupServer.parent == self.release_group)
 			.join(Server)
 			.on(Server.name == ReleaseGroupServer.server)
@@ -458,7 +460,7 @@ def create_free_app_subscription(app: str, site: str | None = None):
 
 def get_app_subscriptions_site_config(apps: list[str], site: str | None = None) -> dict:
 	subscriptions = []
-	site_config = {}
+	site_config: dict[str, Any] = {}
 
 	for app in apps:
 		if not (s := create_free_app_subscription(app, site)):
@@ -477,6 +479,8 @@ def replenish_standby_sites():
 	"""Create standby sites for all products with pooling enabled. This is called by the scheduler."""
 	products = frappe.get_all("Product Trial", {"enable_pooling": 1}, pluck="name")
 	for product in products:
+		if has_job_timeout_exceeded():
+			return
 		product: ProductTrial = frappe.get_doc("Product Trial", product)
 		try:
 			product.create_standby_sites_in_each_cluster()
@@ -559,13 +563,15 @@ def sync_product_site_users():
 		)
 
 
-def send_suspend_mail(site: str, product: str) -> None:
+def send_suspend_mail(site_name: str, product_name: str) -> None:
 	"""Send suspension mail to the site owner."""
 
-	site = frappe.db.get_value("Site", site, ["team", "trial_end_date", "name", "host_name"], as_dict=True)
+	site = frappe.db.get_value(
+		"Site", site_name, ["team", "trial_end_date", "name", "host_name"], as_dict=True
+	)
 	product = frappe.db.get_value(
 		"Product Trial",
-		product,
+		product_name,
 		["title", "suspension_email_subject", "suspension_email_content", "email_full_logo", "logo"],
 		as_dict=True,
 	)
@@ -580,12 +586,27 @@ def send_suspend_mail(site: str, product: str) -> None:
 	)
 	recipient = frappe.get_value("Team", site.team, "user")
 	args = {}
-
+	inline_images = []
 	# TODO: enable it when we use the full logo
 	# if product.email_full_logo:
 	# 	args.update({"image_path": get_url(product.email_full_logo, True)})
 	if product.logo:
 		args.update({"logo": get_url(product.logo, True), "title": product.title})
+		try:
+			logo_name = product.logo[1:]
+			args.update({"logo_name": logo_name})
+			with open(frappe.utils.get_site_path("public", logo_name), "rb") as logo_file:
+				inline_images.append(
+					{
+						"filename": logo_name,
+						"filecontent": logo_file.read(),
+					}
+				)
+		except Exception as ex:
+			log_error(
+				"Error reading logo for inline images in email",
+				data=ex,
+			)
 	if product.email_account:
 		sender = frappe.get_value("Email Account", product.email_account, "email_id")
 
@@ -595,11 +616,11 @@ def send_suspend_mail(site: str, product: str) -> None:
 	}
 	message = frappe.render_template(product.suspension_email_content, context)
 	args.update({"message": message})
-
 	frappe.sendmail(
 		sender=sender,
 		recipients=recipient,
 		subject=subject,
 		template="product_trial_email",
 		args=args,
+		inline_images=inline_images,
 	)

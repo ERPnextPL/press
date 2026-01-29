@@ -12,9 +12,12 @@ import shutil
 import tarfile
 import tempfile
 import typing
+import warnings
 from datetime import datetime, timedelta
 from enum import Enum
 from functools import cached_property
+from typing import TypedDict
+from urllib.parse import quote
 
 import frappe
 import requests
@@ -30,12 +33,14 @@ from press.agent import Agent
 from press.exceptions import ImageNotFoundInRegistry
 from press.press.doctype.deploy_candidate.deploy_notifications import (
 	create_build_failed_notification,
+	create_build_warning_notification,
 )
 from press.press.doctype.deploy_candidate.docker_output_parsers import (
 	DockerBuildOutputParser,
 	UploadStepUpdater,
 )
 from press.press.doctype.deploy_candidate.utils import (
+	BuildWarning,
 	get_arm_build_server_with_least_active_builds,
 	get_build_server,
 	get_intel_build_server_with_least_active_builds,
@@ -49,6 +54,8 @@ from press.utils.jobs import get_background_jobs, stop_background_job
 from press.utils.webhook import create_webhook_event
 
 if typing.TYPE_CHECKING:
+	from warnings import WarningMessage
+
 	from rq.job import Job
 
 	from press.press.doctype.agent_job.agent_job import AgentJob
@@ -57,6 +64,7 @@ if typing.TYPE_CHECKING:
 	from press.press.doctype.deploy_candidate_app.deploy_candidate_app import (
 		DeployCandidateApp,
 	)
+	from press.press.doctype.press_settings.press_settings import PressSettings
 	from press.press.doctype.release_group_server.release_group_server import ReleaseGroupServer
 
 # build_duration, pending_duration are Time fields, >= 1 day is invalid
@@ -124,6 +132,27 @@ STEP_SLUG_MAP = {
 	("package", "context"): "Build Context",
 	("upload", "context"): "Build Context",
 }
+
+
+class AssetStoreCredentials(TypedDict):
+	secret_access_key: str
+	access_key: str
+	region_name: str
+	endpoint_url: str
+	bucket_name: str
+
+
+def get_asset_store_credentials() -> AssetStoreCredentials:
+	"""Return asset store credentials from Press Settings."""
+	settings: PressSettings = frappe.get_cached_doc("Press Settings")
+
+	return {
+		"secret_access_key": settings.get_password("asset_store_secret_access_key"),
+		"access_key": settings.asset_store_access_key,
+		"region_name": settings.asset_store_region,
+		"endpoint_url": settings.asset_store_endpoint,
+		"bucket_name": settings.asset_store_bucket_name,
+	}
 
 
 def get_build_stage_and_step(
@@ -342,6 +371,7 @@ class DeployCandidateBuild(Document):
 				if d.dependency == "BENCH_VERSION" and d.version == "5.2.1":
 					dockerfile_template = "press/docker/Dockerfile_Bench_5_2_1"
 
+			team_deploying = frappe.db.get_value("Release Group", self.group, "team")
 			content = frappe.render_template(
 				dockerfile_template,
 				{
@@ -349,6 +379,15 @@ class DeployCandidateBuild(Document):
 					"remove_distutils": not is_distutils_supported,
 					"requires_version_based_get_pip": requires_version_based_get_pip,
 					"is_arm_build": self.platform == "arm64",
+					"use_asset_store": int(
+						frappe.db.get_single_value("Press Settings", "use_asset_store")
+						or team_deploying == "team@erpnext.com"
+					),
+					"upload_assets": int(
+						frappe.db.get_value("Release Group", self.group, "public")
+						or team_deploying == "team@erpnext.com"
+					),
+					"site_url": frappe.utils.get_url(),
 				},
 				is_path=True,
 			)
@@ -372,7 +411,7 @@ class DeployCandidateBuild(Document):
 			f.write(content)
 
 	def _copy_config_files(self):
-		for target in ["common_site_config.json", "supervisord.conf", ".vimrc"]:
+		for target in ["common_site_config.json", "supervisord.conf", ".vimrc", "get_cached_app.py"]:
 			shutil.copy(os.path.join(frappe.get_app_path("press", "docker"), target), self.build_directory)
 
 		for target in ["config", "redis"]:
@@ -639,10 +678,19 @@ class DeployCandidateBuild(Document):
 
 		return False
 
+	def handle_build_warning(self, title, warning: "WarningMessage") -> None:
+		"""Create warning notification similar to error notifications"""
+		create_build_warning_notification(
+			dc=self.candidate,
+			dcb=self,
+			title=title,
+			message=warning.message,
+		)
+
 	def handle_build_failure(
 		self,
 		exc: Exception | None = None,
-		job: "AgentJob | None" = None,
+		job: AgentJob | None = None,
 	) -> None:
 		self._flush_output_parsers()
 		self.set_status(Status.FAILURE)
@@ -971,6 +1019,7 @@ class DeployCandidateBuild(Document):
 			},
 			"no_cache": self.no_cache,
 			"no_push": self.no_push,
+			"build_token": self.candidate.build_token,
 			# Next few values are not used by agent but are
 			# read in `process_run_build`
 			"deploy_candidate_build": self.name,
@@ -1010,25 +1059,14 @@ class DeployCandidateBuild(Document):
 		self.docker_image_tag = self.name
 		self.docker_image = f"{self.docker_image_repository}:{self.docker_image_tag}"
 
-	def is_image_in_registry(self) -> bool:
+	def check_image_in_registry(self) -> bool:
 		"""Check if the image tag exists on registry"""
 		settings = self._fetch_registry_settings()
-		headers = {"Accept": "application/vnd.docker.distribution.manifest.v2+json"}
-		auth = (settings.docker_registry_username, settings.docker_registry_password)
-		repository = self.docker_image_repository.replace(settings.docker_registry_url, "")
 
 		if settings.docker_registry_url != "registry.frappe.cloud":
 			return True
 
-		response = requests.get(
-			f"https://{settings.docker_registry_url}/v2/{repository}/tags/list", auth=auth, headers=headers
-		)
-
-		if not response.ok:
-			return False
-
-		image_tags = response.json().get("tags", [])
-		return self.name in image_tags
+		return is_image_in_registry(self.name, self.group, settings)
 
 	def _start_build(self):
 		self._update_docker_image_metadata()
@@ -1043,8 +1081,23 @@ class DeployCandidateBuild(Document):
 		)
 		self._set_output_parsers()
 
+		# https://docs.python.org/3/library/warnings.html#testing-warnings
+		with warnings.catch_warnings(record=True) as caught_warnings:
+			warnings.simplefilter("always", BuildWarning)  # capture everything
+
+			try:
+				self._prepare_build()
+			except Exception as exc:
+				self.handle_build_failure(exc)
+				return
+
+			for warning in caught_warnings:
+				self.handle_build_warning(
+					title="Pre Build Validation Warning",
+					warning=warning,
+				)
+
 		try:
-			self._prepare_build()
 			self._start_build()
 		except Exception as exc:
 			self.handle_build_failure(exc)
@@ -1207,7 +1260,7 @@ class DeployCandidateBuild(Document):
 		return self._create_deploy(servers, check_image_exists=check_image_exists).name
 
 	def _create_deploy(self, servers: list[str], check_image_exists: bool = False):
-		if check_image_exists and not self.is_image_in_registry():
+		if check_image_exists and not self.check_image_in_registry():
 			frappe.throw("Image not found in registry create a new build", ImageNotFoundInRegistry)
 
 		return frappe.get_doc(
@@ -1264,6 +1317,20 @@ def fail_and_redeploy(dn: str):
 	build: DeployCandidateBuild = frappe.get_doc("Deploy Candidate Build", dn)
 
 	return build.redeploy()
+
+
+@frappe.whitelist()
+def redeploy(dn: str) -> dict[str, str | bool]:
+	"""Allow redeploy preserving app sources if the deploy is in terminal stage"""
+	deploy_candidate_build: DeployCandidateBuild = frappe.get_doc("Deploy Candidate Build", dn)
+
+	if deploy_candidate_build.status in Status.intermediate():
+		frappe.throw(
+			"Wait for deploy to finish or stop current deploy first!",
+			frappe.ValidationError,
+		)
+
+	return deploy_candidate_build.redeploy()
 
 
 @frappe.whitelist()
@@ -1574,3 +1641,50 @@ def _create_arm_build(deploy_candidate: str) -> DeployCandidateBuild:
 	# Since we don't want loose builds
 	frappe.db.set_value("Deploy Candidate", {"name": deploy_candidate}, "arm_build", arm_build.name)
 	return arm_build.name
+
+
+def query_digitalocean_registry(image: str, group: str, settings: dict[str, str]) -> bool:
+	headers = {
+		"Authorization": f"Bearer {settings['docker_registry_password']}",
+		"Accept": "Content-Type: application/json",
+	}
+	repo = f"{settings['domain']}/{group}"
+	encoded_repo = quote(repo, safe="")
+
+	url = (
+		"https://api.digitalocean.com/v2/registry/"
+		f"{settings['docker_registry_namespace']}/repositories/{encoded_repo}/tags"
+	)
+
+	response = requests.get(url, headers=headers)
+
+	if not response.ok:
+		return False
+
+	tags = response.json().get("tags")
+
+	return any(image == tag_metadata["tag"] for tag_metadata in tags)
+
+
+def is_image_in_registry(image: str, group: str, settings: dict[str, str]) -> bool:
+	headers = {"Accept": "application/vnd.docker.distribution.manifest.v2+json"}
+	auth = (settings["docker_registry_username"], settings["docker_registry_password"])
+	namespace = (
+		f"{settings['docker_registry_namespace']}/{settings['domain']}"
+		if settings["docker_registry_namespace"]
+		else settings["domain"]
+	)
+	registry = settings["docker_registry_url"]
+
+	if registry == "registry.digitalocean.com":
+		return query_digitalocean_registry(image, group, settings)
+
+	url = f"https://{registry}/v2/{namespace}/{group}/tags/list"
+
+	response = requests.get(url, auth=auth, headers=headers)
+
+	if not response.ok:
+		return False
+
+	image_tags = response.json().get("tags")
+	return image in image_tags

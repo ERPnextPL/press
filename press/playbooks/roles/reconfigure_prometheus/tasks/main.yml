@@ -39,8 +39,10 @@
   template:
     src: ../../prometheus/templates/prometheus.yml
     dest: /home/frappe/prometheus/prometheus.yml
-    force: true
+    owner: frappe
+    group: frappe
     mode: 0600
+    force: true
     validate: "/home/frappe/prometheus/promtool check config %s"
 
 - name: Set ownership of prometheus.yml to frappe

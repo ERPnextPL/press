@@ -11,6 +11,7 @@
   "domain",
   "self_hosted_server_domain",
   "tls_certificate_renewal_failed",
+  "plan",
   "column_break_3",
   "cluster",
   "provider",
@@ -71,7 +72,6 @@
  ],
  "fields": [
   {
-   "fetch_from": "virtual_machine.public_ip_address",
    "fieldname": "ip",
    "fieldtype": "Data",
    "in_list_view": 1,
@@ -158,7 +158,6 @@
    "fieldtype": "Link",
    "label": "Domain",
    "options": "Root Domain",
-   "read_only": 1,
    "set_only_once": 1
   },
   {
@@ -166,7 +165,7 @@
    "fieldname": "provider",
    "fieldtype": "Select",
    "label": "Provider",
-   "options": "Generic\nScaleway\nAWS EC2\nOCI\nHetzner",
+   "options": "Generic\nScaleway\nAWS EC2\nOCI\nHetzner\nVodacom\nDigitalOcean",
    "set_only_once": 1
   },
   {
@@ -212,7 +211,7 @@
    "options": "Proxy Server Domain"
   },
   {
-   "depends_on": "eval:[\"AWS EC2\", \"OCI\", \"Hetzner\"].includes(doc.provider)",
+   "depends_on": "eval:[\"AWS EC2\", \"OCI\", \"Hetzner\", \"DigitalOcean\"].includes(doc.provider)",
    "fieldname": "virtual_machine",
    "fieldtype": "Link",
    "label": "Virtual Machine",
@@ -458,10 +457,16 @@
    "fieldtype": "Check",
    "label": "Is Static IP",
    "read_only": 1
+  },
+  {
+   "fieldname": "plan",
+   "fieldtype": "Link",
+   "label": "Plan",
+   "options": "Server Plan"
   }
  ],
  "links": [],
- "modified": "2025-10-10 09:35:03.473042",
+ "modified": "2026-01-18 16:20:49.521726",
  "modified_by": "Administrator",
  "module": "Press",
  "name": "Proxy Server",

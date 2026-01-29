@@ -8,7 +8,7 @@ import os
 import re
 from contextlib import suppress
 from datetime import date
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal
 
 import frappe
 import frappe.utils
@@ -191,7 +191,7 @@ class Agent:
 		)
 
 	def rename_site(self, site, new_name: str, create_user: dict | None = None, config: dict | None = None):
-		data = {"new_name": new_name}
+		data: dict[str, Any] = {"new_name": new_name}
 		if create_user:
 			data["create_user"] = create_user
 		if config:
@@ -228,10 +228,11 @@ class Agent:
 			site=site.name,
 		)
 
-	def optimize_tables(self, site):
+	def optimize_tables(self, site, tables):
 		return self.create_agent_job(
 			"Optimize Tables",
 			f"benches/{site.bench}/sites/{site.name}/optimize",
+			data={"tables": tables},
 			bench=site.bench,
 			site=site.name,
 		)
@@ -273,6 +274,8 @@ class Agent:
 			public_link = frappe.get_doc("Remote File", site.remote_public_file).download_link
 		if site.remote_private_file:
 			private_link = frappe.get_doc("Remote File", site.remote_private_file).download_link
+
+		assert site.config is not None, "Site config is required to restore site from backup"
 
 		data = {
 			"config": json.loads(site.config),
@@ -636,6 +639,21 @@ class Agent:
 		data = {"name": private_ip}
 		return self.create_agent_job("Rename Upstream", f"proxy/upstreams/{ip}/rename", data, upstream=server)
 
+	def proxy_add_auto_scale_site_to_upstream(
+		self, primary_upstream: str, secondary_upstreams: list[dict[str, int]]
+	) -> "AgentJob":
+		return self.create_agent_job(
+			"Add Auto Scale Site to Upstream",
+			f"proxy/upstreams/{primary_upstream}/auto-scale-site",
+			data={"secondary_upstreams": secondary_upstreams},
+		)
+
+	def proxy_remove_auto_scale_site_to_upstream(self, primary_upstream: str) -> "AgentJob":
+		return self.create_agent_job(
+			"Remove Auto Scale Site from Upstream",
+			f"proxy/upstreams/{primary_upstream}/remove-auto-scale-site",
+		)
+
 	def new_upstream_file(self, server, site=None, code_server=None):
 		_server = frappe.get_doc("Server", server)
 		ip = _server.ip if _server.is_self_hosted else _server.private_ip
@@ -967,6 +985,12 @@ class Agent:
 					"failure_count": 1,
 				}
 			)
+			is_primary = frappe.db.get_value(self.server_type, self.server, "is_primary")
+			if self.server_type == "Server" and not is_primary:
+				# Don't create agent request failures for secondary servers
+				# Since we try to connect to them frequently after IP changes
+				return
+
 			frappe.new_doc("Agent Request Failure", **fields).insert(ignore_permissions=True)
 
 	def raw_request(self, method, path, data=None, raises=True, timeout=None):
@@ -1017,7 +1041,7 @@ Response: {reason or getattr(result, "text", "Unknown")}
 		self,
 		job_type,
 		path,
-		data=None,
+		data: dict | None = None,
 		files=None,
 		method="POST",
 		bench=None,
@@ -1038,12 +1062,12 @@ Response: {reason or getattr(result, "text", "Unknown")}
 		)
 
 		if not disable_agent_job_deduplication:
-			job = self.get_similar_in_execution_job(
+			existing_job = self.get_similar_in_execution_job(
 				job_type, path, bench, site, code_server, upstream, host, method
 			)
 
-			if job:
-				return job
+			if existing_job:
+				return existing_job
 
 		job: "AgentJob" = frappe.get_doc(
 			{
@@ -1093,7 +1117,7 @@ Response: {reason or getattr(result, "text", "Unknown")}
 			filters["bench"] = bench
 
 		if site:
-			filters["site"] = site
+			filters["site"] = site if not isinstance(site, list) else ("IN", site)
 
 		if code_server:
 			filters["code_server"] = code_server
@@ -1104,7 +1128,7 @@ Response: {reason or getattr(result, "text", "Unknown")}
 		if host:
 			filters["host"] = host
 
-		job = frappe.db.get_value("Agent Job", filters, "name")
+		job = frappe.db.get_value("Agent Job", filters, "name", debug=1)
 
 		return frappe.get_doc("Agent Job", job) if job else False
 
@@ -1375,6 +1399,23 @@ Response: {reason or getattr(result, "text", "Unknown")}
 			},
 		)
 
+	def update_database_schema_sizes(self):
+		if self.server_type != "Database Server":
+			return NotImplementedError("This method is only supported for Database Server")
+
+		return self.create_agent_job(
+			"Update Database Schema Sizes",
+			"database/update-schema-sizes",
+			data={
+				"private_ip": frappe.get_value("Database Server", self.server, "private_ip"),
+				"mariadb_root_password": get_decrypted_password(
+					"Database Server", self.server, "mariadb_root_password"
+				),
+			},
+			reference_doctype=self.server_type,
+			reference_name=self.server,
+		)
+
 	def fetch_database_variables(self):
 		if self.server_type != "Database Server":
 			return NotImplementedError("Only Database Server supports this method")
@@ -1404,6 +1445,30 @@ Response: {reason or getattr(result, "text", "Unknown")}
 			data={
 				"image_tags": image_tags,
 				"registry": {
+					"url": settings.docker_registry_url,
+					"username": settings.docker_registry_username,
+					"password": settings.docker_registry_password,
+				},
+			},
+			reference_doctype=reference_doctype,
+			reference_name=reference_name,
+		)
+
+	def push_docker_images(
+		self, images: list[str], reference_doctype: str | None = None, reference_name: str | None = None
+	) -> AgentJob:
+		settings = frappe.db.get_value(
+			"Press Settings",
+			None,
+			["docker_registry_url", "docker_registry_username", "docker_registry_password"],
+			as_dict=True,
+		)
+		return self.create_agent_job(
+			"Push Images to Registry",
+			"/server/push-images",
+			data={
+				"images": images,
+				"registry_settings": {
 					"url": settings.docker_registry_url,
 					"username": settings.docker_registry_username,
 					"password": settings.docker_registry_password,
@@ -1451,10 +1516,27 @@ Response: {reason or getattr(result, "text", "Unknown")}
 			"Remove Binlogs From Indexer", "/database/binlogs/indexer/remove", data={"binlogs": binlogs}
 		)
 
-	def get_binlogs_timeline(self, start: int, end: int, database: str, type: str | None = None):
+	def get_binlogs_timeline(
+		self,
+		start: int,
+		end: int,
+		database: str,
+		table: str | None = None,
+		type: str | None = None,
+		event_size_comparator: Literal["gt", "lt"] | None = None,
+		event_size: int | None = None,
+	):
 		return self.post(
 			"/database/binlogs/indexer/timeline",
-			data={"start_timestamp": start, "end_timestamp": end, "database": database, "type": type},
+			data={
+				"start_timestamp": start,
+				"end_timestamp": end,
+				"database": database,
+				"table": table,
+				"type": type,
+				"event_size_comparator": event_size_comparator,
+				"event_size": event_size,
+			},
 		)
 
 	def search_binlogs(
@@ -1465,6 +1547,8 @@ Response: {reason or getattr(result, "text", "Unknown")}
 		type: str | None = None,
 		table: str | None = None,
 		search_str: str | None = None,
+		event_size_comparator: Literal["gt", "lt"] | None = None,
+		event_size: int | None = None,
 	):
 		return self.post(
 			"/database/binlogs/indexer/search",
@@ -1475,6 +1559,8 @@ Response: {reason or getattr(result, "text", "Unknown")}
 				"type": type,
 				"table": table,
 				"search_str": search_str,
+				"event_size_comparator": event_size_comparator,
+				"event_size": event_size,
 			},
 		)
 
@@ -1591,14 +1677,14 @@ Response: {reason or getattr(result, "text", "Unknown")}
 	):
 		from press.press.doctype.site_backup.site_backup import get_backup_bucket
 
-		database_server: DatabaseServer = frappe.get_doc("Database Server", database_server)
+		database_server_doc: DatabaseServer = frappe.get_doc("Database Server", database_server)  # type: ignore
 		data = {
 			"site": site,
 			"database_name": database_name,
 			"database_ip": frappe.get_value(
-				"Virtual Machine", database_server.virtual_machine, "private_ip_address"
+				"Virtual Machine", database_server_doc.virtual_machine, "private_ip_address"
 			),
-			"mariadb_root_password": database_server.get_password("mariadb_root_password"),
+			"mariadb_root_password": database_server_doc.get_password("mariadb_root_password"),
 		}
 
 		# offsite config
@@ -1634,7 +1720,7 @@ Response: {reason or getattr(result, "text", "Unknown")}
 	):
 		from press.press.doctype.site_backup.site_backup import get_backup_bucket
 
-		data = {
+		data: dict[str, Any] = {
 			"site": site,
 			"bench": bench,
 		}
@@ -1680,7 +1766,6 @@ Response: {reason or getattr(result, "text", "Unknown")}
 		secondary_server_private_ip: str,
 		is_primary: bool,
 		directory: str,
-		redis_password: str,
 		restart_benches: bool,
 		reference_name: str | None = None,
 		redis_connection_string_ip: str | None = None,
@@ -1693,7 +1778,6 @@ Response: {reason or getattr(result, "text", "Unknown")}
 			data={
 				"restart_benches": restart_benches,
 				"redis_connection_string_ip": redis_connection_string_ip,
-				"redis_password": redis_password,
 				"is_primary": is_primary,
 				"directory": directory,
 				"secondary_server_private_ip": secondary_server_private_ip,
@@ -1705,9 +1789,7 @@ Response: {reason or getattr(result, "text", "Unknown")}
 
 	def add_servers_to_acl(
 		self,
-		primary_server_private_ip: str,
 		secondary_server_private_ip: str,
-		shared_directory: str,
 		reference_doctype: str | None = None,
 		reference_name: str | None = None,
 	) -> AgentJob:
@@ -1715,9 +1797,7 @@ Response: {reason or getattr(result, "text", "Unknown")}
 			"Add Servers to ACL",
 			"/nfs/add-to-acl",
 			data={
-				"primary_server_private_ip": primary_server_private_ip,
 				"secondary_server_private_ip": secondary_server_private_ip,
-				"shared_directory": shared_directory,
 			},
 			reference_doctype=reference_doctype,
 			reference_name=reference_name,
@@ -1725,9 +1805,7 @@ Response: {reason or getattr(result, "text", "Unknown")}
 
 	def remove_servers_from_acl(
 		self,
-		primary_server_private_ip: str,
 		secondary_server_private_ip: str,
-		shared_directory: str,
 		reference_doctype: str | None = None,
 		reference_name: str | None = None,
 	) -> AgentJob:
@@ -1735,9 +1813,7 @@ Response: {reason or getattr(result, "text", "Unknown")}
 			"Remove Servers from ACL",
 			"/nfs/remove-from-acl",
 			data={
-				"primary_server_private_ip": primary_server_private_ip,
 				"secondary_server_private_ip": secondary_server_private_ip,
-				"shared_directory": shared_directory,
 			},
 			reference_doctype=reference_doctype,
 			reference_name=reference_name,
@@ -1763,6 +1839,16 @@ Response: {reason or getattr(result, "text", "Unknown")}
 			reference_name=reference_name,
 		)
 
+	def remove_redis_localhost_bind(
+		self, reference_doctype: str | None = None, reference_name: str | None = None
+	) -> AgentJob:
+		return self.create_agent_job(
+			"Remove Redis Localhost Bind",
+			"/server/remove-localhost-redis-bind",
+			reference_doctype=reference_doctype,
+			reference_name=reference_name,
+		)
+
 	def force_remove_all_benches(
 		self, reference_doctype: str | None = None, reference_name: str | None = None
 	) -> AgentJob:
@@ -1771,6 +1857,16 @@ Response: {reason or getattr(result, "text", "Unknown")}
 			"/server/force-remove-all-benches",
 			reference_doctype=reference_doctype,
 			reference_name=reference_name,
+		)
+
+	def update_nginx_access(self, ip_accept: list[str], ip_drop: list[str]) -> AgentJob:
+		return self.create_agent_job(
+			"Update Nginx Access",
+			"/server/update-nginx-access",
+			data={
+				"ip_access": ip_accept,
+				"ip_drop": ip_drop,
+			},
 		)
 
 

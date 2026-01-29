@@ -15,14 +15,14 @@
 						'bg-green-50 border-green-200 text-green-800':
 							banner.type === 'success',
 						'bg-red-50 border-red-200 text-red-800': banner.type === 'error',
+						'bg-gray-50 border-gray-200 text-gray-800':
+							banner.type === 'neutral',
 					}"
 				>
 					{{ banner.message }}
 				</div>
-				<p v-if="isReceived" class="leading-normal">
-					Do you want to accept or reject this access request from
-					<span class="font-medium">{{ request.doc?.requested_by }}</span
-					>?
+				<p v-if="isReceived && isPending" class="leading-normal">
+					Do you want to accept or reject this access request?
 				</p>
 				<div class="rounded-sm border divide-y">
 					<div
@@ -32,12 +32,27 @@
 						<div class="col-span-1 py-2 px-3 font-medium">
 							{{ resource.document_type }}
 						</div>
-						<div class="col-span-2 py-2 px-3">{{ resource.document_name }}</div>
+						<div class="col-span-2 py-2 px-3">
+							<Link
+								:to="
+									resourceLink(resource.document_type, resource.document_name)
+								"
+								@click="
+									() =>
+										resourceLink(
+											resource.document_type,
+											resource.document_name,
+										) && (open = false)
+								"
+							>
+								{{ resource.document_name }}
+							</Link>
+						</div>
 					</div>
 				</div>
 				<div v-if="request.doc?.reason" class="space-y-2">
 					<p class="font-medium">Reason:</p>
-					<p>{{ request.doc?.reason }}</p>
+					<p class="leading-relaxed">{{ request.doc?.reason }}</p>
 				</div>
 				<div v-if="permissions.length" class="space-y-2">
 					<p class="font-medium">Permissions:</p>
@@ -58,9 +73,11 @@
 </template>
 
 <script setup lang="ts">
+import Link from './Link.vue';
 import { Badge, createDocumentResource, createResource } from 'frappe-ui';
 import { computed, ref } from 'vue';
 import { getTeam } from '../data/team';
+import { toast } from 'vue-sonner';
 
 const props = defineProps<{
 	name: string;
@@ -68,13 +85,19 @@ const props = defineProps<{
 
 const open = ref(true);
 const team = getTeam();
+
 const request = createDocumentResource({
 	doctype: 'Support Access',
 	name: props.name,
 	auto: true,
 });
+
 const isReceived = computed(() => {
 	return team.doc?.name === request.doc?.target_team;
+});
+
+const isPending = computed(() => {
+	return request.doc?.status === 'Pending';
 });
 
 const permissions = computed(() =>
@@ -102,30 +125,17 @@ const permissions = computed(() =>
 	].filter((p) => p.requested),
 );
 
-const accept = createResource({
+const update = createResource({
 	url: 'press.api.client.set_value',
-	params: {
+	makeParams: (args: any) => ({
 		doctype: 'Support Access',
 		name: props.name,
 		fieldname: {
-			status: 'Accepted',
+			status: args.status,
 		},
-	},
-	onSuccess: () => {
-		open.value = false;
-	},
-});
-
-const reject = createResource({
-	url: 'press.api.client.set_value',
-	params: {
-		doctype: 'Support Access',
-		name: props.name,
-		fieldname: {
-			status: 'Rejected',
-		},
-	},
-	onSuccess: () => {
+	}),
+	onSuccess: (data: any) => {
+		toast.success(`Request ${data.status}`);
 		open.value = false;
 	},
 });
@@ -141,26 +151,99 @@ const banner = computed(() => {
 			type: 'error',
 			message: 'This request has been rejected.',
 		};
+	} else if (request.doc?.status === 'Revoked') {
+		return {
+			type: 'neutral',
+			message: 'This request has been revoked.',
+		};
+	} else if (request.doc?.status === 'Forfeited') {
+		return {
+			type: 'neutral',
+			message: 'This request has been forfeited.',
+		};
 	}
 });
 
 const actions = computed(() => {
-	if (request.doc?.status !== 'Pending' || !isReceived.value) {
-		return [];
+	const actions = [];
+	const isExpired = new Date(request.doc.access_allowed_till) < new Date();
+
+	if (request.doc?.status === 'Pending' && isReceived.value) {
+		actions.push(
+			{
+				label: 'Reject',
+				variant: 'subtle',
+				theme: 'red',
+				onClick: () => {
+					update.submit({
+						status: 'Rejected',
+					});
+				},
+			},
+			{
+				label: 'Accept',
+				variant: 'solid',
+				onClick: () => {
+					update.submit({
+						status: 'Accepted',
+					});
+				},
+			},
+		);
 	}
 
-	return [
-		{
-			label: 'Reject',
+	if (request.doc?.status === 'Accepted' && isReceived.value && !isExpired) {
+		actions.push({
+			label: 'Revoke',
 			variant: 'subtle',
 			theme: 'red',
-			onClick: () => reject.submit(),
-		},
-		{
-			label: 'Accept',
-			variant: 'solid',
-			onClick: () => accept.submit(),
-		},
-	];
+			onClick: () => {
+				update.submit({
+					status: 'Revoked',
+				});
+			},
+		});
+	}
+
+	if (request.doc?.status === 'Accepted' && !isReceived.value && !isExpired) {
+		actions.push({
+			label: 'Forfeit',
+			variant: 'subtle',
+			theme: 'red',
+			onClick: () => {
+				update.submit({
+					status: 'Forfeited',
+				});
+			},
+		});
+	}
+
+	return actions;
 });
+
+const resourceLink = (documentType: string, documentName: string) => {
+	switch (documentType) {
+		case 'Site':
+			return {
+				name: 'Site Detail',
+				params: {
+					name: documentName,
+				},
+			};
+		case 'Release Group':
+			return {
+				name: 'Release Group Detail',
+				params: {
+					name: documentName,
+				},
+			};
+		case 'Bench':
+			return {
+				name: 'Bench Detail',
+				params: {
+					name: documentName,
+				},
+			};
+	}
+};
 </script>

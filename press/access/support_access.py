@@ -1,8 +1,9 @@
 import frappe
 import frappe.utils
 
+from press import utils as press_utils
+from press.access import utils as access_utils
 from press.access.actions import ReleaseGroupActions, SiteActions
-from press.utils import get_current_team
 
 TAB_DF_MAP = {
 	"Site": {
@@ -38,9 +39,14 @@ def has_support_access(doctype: str, docname: str, action: str | None = None) ->
 	if frappe.local.system_user():
 		return True
 
+	if not press_utils.has_role("Press Support Agent"):
+		return False
+
+	if access_utils.is_public_resource(doctype, docname):
+		return True
+
 	filters = {
 		"status": "Accepted",
-		"requested_team": get_current_team(),
 		"access_allowed_till": (">", frappe.utils.now_datetime()),
 	}
 
@@ -48,6 +54,10 @@ def has_support_access(doctype: str, docname: str, action: str | None = None) ->
 		filters[field] = 1
 
 	accesses = frappe.get_all("Support Access", filters=filters, pluck="name")
+
+	if doctype == "Bench":
+		doctype = "Release Group"
+		docname = frappe.get_value("Bench", docname, "group")
 
 	for access in accesses:
 		if frappe.db.exists(

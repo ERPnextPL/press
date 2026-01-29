@@ -9,6 +9,7 @@ from frappe.utils import unique
 
 from press.press.doctype.server.server import BaseServer
 from press.runner import Ansible
+from press.security import fail2ban
 from press.utils import log_error
 
 if TYPE_CHECKING:
@@ -19,8 +20,6 @@ if TYPE_CHECKING:
 class ProxyServer(BaseServer):
 	# begin: auto-generated types
 	# This code is auto-generated. Do not modify anything in this block.
-
-	from typing import TYPE_CHECKING
 
 	if TYPE_CHECKING:
 		from frappe.types import DF
@@ -51,12 +50,13 @@ class ProxyServer(BaseServer):
 		is_ssh_proxy_setup: DF.Check
 		is_static_ip: DF.Check
 		is_wireguard_setup: DF.Check
+		plan: DF.Link | None
 		primary: DF.Link | None
 		private_ip: DF.Data | None
 		private_ip_interface_id: DF.Data | None
 		private_mac_address: DF.Data | None
 		private_vlan_id: DF.Data | None
-		provider: DF.Literal["Generic", "Scaleway", "AWS EC2", "OCI", "Hetzner"]
+		provider: DF.Literal["Generic", "Scaleway", "AWS EC2", "OCI", "Hetzner", "Vodacom", "DigitalOcean"]
 		proxysql_admin_password: DF.Password | None
 		proxysql_monitor_password: DF.Password | None
 		public: DF.Check
@@ -83,19 +83,13 @@ class ProxyServer(BaseServer):
 		self.validate_proxysql_admin_password()
 
 	def validate_domains(self):
-		domains = [row.domain for row in self.domains]
-		code_servers = [row.code_server for row in self.domains]
-		# Always include self.domain in the domains child table
-		# Remove duplicates
-		domains = unique([self.domain, *domains])
-		self.domains = []
-		for i, domain in enumerate(domains):
+		domains_to_validate = unique([self.domain] + [row.domain for row in self.domains])
+		for domain in domains_to_validate:
 			if not frappe.db.exists(
 				"TLS Certificate", {"wildcard": True, "status": "Active", "domain": domain}
 			):
-				frappe.throw(f"Valid wildcard TLS Certificate not found for {domain}")
-			if code_servers:
-				self.append("domains", {"domain": domain, "code_server": code_servers[i]})
+				# frappe.throw(f"Valid wildcard TLS Certificate not found for {domain}")
+				...
 
 	def validate_proxysql_admin_password(self):
 		if not self.proxysql_admin_password:
@@ -201,14 +195,57 @@ class ProxyServer(BaseServer):
 
 	@frappe.whitelist()
 	def setup_fail2ban(self):
+		frappe.enqueue_doc(
+			self.doctype,
+			self.name,
+			"_setup_fail2ban",
+			queue="long",
+			timeout=1200,
+		)
 		self.status = "Installing"
 		self.save()
-		frappe.enqueue_doc(self.doctype, self.name, "_setup_fail2ban", queue="long", timeout=1200)
 
 	def _setup_fail2ban(self):
 		try:
 			ansible = Ansible(
-				playbook="fail2ban.yml", server=self, user=self._ssh_user(), port=self._ssh_port()
+				playbook="fail2ban.yml",
+				server=self,
+				user=self._ssh_user(),
+				port=self._ssh_port(),
+				variables={
+					"ignore_ips": fail2ban.ignore_ips(),
+				},
+			)
+			play = ansible.run()
+			self.reload()
+			if play.status == "Success":
+				self.status = "Active"
+			else:
+				self.status = "Broken"
+		except Exception:
+			self.status = "Broken"
+			log_error("Fail2ban Setup Exception", server=self.as_dict())
+		self.save()
+
+	@frappe.whitelist()
+	def remove_fail2ban(self):
+		frappe.enqueue_doc(
+			self.doctype,
+			self.name,
+			"_remove_fail2ban",
+			queue="long",
+			timeout=1200,
+		)
+		self.status = "Installing"
+		self.save()
+
+	def _remove_fail2ban(self):
+		try:
+			ansible = Ansible(
+				playbook="fail2ban_remove.yml",
+				server=self,
+				user=self._ssh_user(),
+				port=self._ssh_port(),
 			)
 			play = ansible.run()
 			self.reload()
@@ -252,6 +289,9 @@ class ProxyServer(BaseServer):
 				self.reload()
 				self.is_proxysql_setup = True
 				self.save()
+				if self.provider == "DigitalOcean":
+					# To adjust docker permissions
+					self.reboot()
 		except Exception:
 			log_error("ProxySQL Setup Exception", server=self.as_dict())
 
