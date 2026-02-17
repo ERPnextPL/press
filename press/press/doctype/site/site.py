@@ -48,6 +48,7 @@ from press.marketplace.doctype.marketplace_app_plan.marketplace_app_plan import 
 	MarketplaceAppPlan,
 )
 from press.press.doctype.communication_info.communication_info import get_communication_info
+from press.press.doctype.root_domain.root_domain import get_matching_domain
 from press.press.doctype.server.server import Server
 from press.saas.doctype.product_trial.product_trial import create_free_app_subscription
 from press.utils.jobs import has_job_timeout_exceeded
@@ -1374,6 +1375,8 @@ class Site(Document, TagHelpers):
 	def add_domain(self, domain):
 		domain = domain.lower().strip(".")
 		response = check_dns_cname_a(self.name, domain)
+		if d := get_matching_domain(domain):
+			frappe.throw(f"Cannot add {d} domain as it is a system reserved domain.")
 		if response["matched"]:
 			if frappe.db.exists("Site Domain", {"domain": domain}):
 				frappe.throw(f"The domain {frappe.bold(domain)} is already used by a site")
@@ -2192,7 +2195,7 @@ class Site(Document, TagHelpers):
 			)
 
 	@dashboard_whitelist()
-	@site_action(["Active"])
+	@site_action(["Active", "Broken"])
 	def update_config(self, config=None):
 		"""Updates site.configuration, meant for dashboard and API users"""
 		if config is None:
@@ -3970,7 +3973,16 @@ def process_new_site_job_update(job):  # noqa: C901
 
 	if "Success" == first == second:
 		updated_status = "Active"
-		marketplace_app_hook(site=Site("Site", job.site), op="install")
+		site: Site = Site("Site", job.site)
+		is_unified_server = frappe.db.get_value("Server", site.server, "is_unified_server")
+		# Only noticed this on unified servers
+		if is_unified_server:
+			Agent(site.server).create_database_access_credentials(
+				site=site
+			)  # In case the permissions are missing correct them
+
+		site.sync_apps()  # Sync apps for this site as well to reflect dependant apps
+		marketplace_app_hook(site=site, op="install")
 	elif "Failure" in (first, second) or "Delivery Failure" in (first, second):
 		updated_status = "Broken"
 		frappe.db.set_value("Site", job.site, "creation_failed", frappe.utils.now())
@@ -4192,10 +4204,13 @@ def process_install_app_site_job_update(job):
 		"Delivery Failure": "Active",
 	}[job.status]
 
-	site_status = frappe.get_value("Site", job.site, "status")
-	if updated_status != site_status:
-		site: Site = frappe.get_doc("Site", job.site)
+	site: Site = frappe.get_doc("Site", job.site)
+
+	if job.status == "Success":
+		# Always sync apps on success to ensure installed app is shown
 		site.sync_apps()
+
+	if updated_status != site.status:
 		frappe.db.set_value("Site", job.site, "status", updated_status)
 		create_site_status_update_webhook_event(job.site)
 
@@ -4248,10 +4263,16 @@ def process_restore_job_update(job, force=False):
 	if force or updated_status != site_status:
 		if job.status == "Success":
 			apps_from_backup: list[str] = [line.split()[0] for line in job.output.splitlines() if line]
-			site = Site("Site", job.site)
+			site: Site = Site("Site", job.site)
+			is_unified_server = frappe.db.get_value("Server", site.server, "is_unified_server")
+			# Only noticed this on unified servers
+			if is_unified_server:
+				Agent(site.server).create_database_access_credentials(
+					site=site
+				)  # In case the permissions are missing correct them
 			process_marketplace_hooks_for_backup_restore(set(apps_from_backup), site)
 			site.set_apps(apps_from_backup)
-			frappe.db.set_value("Site", job.site, "creation_failed", None)
+			frappe.db.set_value("Site", site.name, "creation_failed", None)
 		elif job.status == "Failure":
 			frappe.db.set_value("Site", job.site, "creation_failed", frappe.utils.now())
 		frappe.db.set_value("Site", job.site, "status", updated_status)
@@ -4272,9 +4293,16 @@ def process_reinstall_site_job_update(job):
 		frappe.db.set_value("Site", job.site, "status", updated_status)
 		create_site_status_update_webhook_event(job.site)
 	if job.status == "Success":
-		frappe.db.set_value("Site", job.site, "setup_wizard_complete", 0)
-		frappe.db.set_value("Site", job.site, "database_name", None)
-		frappe.db.set_value("Site", job.site, "additional_system_user_created", False)
+		site: Site = Site("Site", job.site)
+		frappe.db.set_value("Site", site.name, "setup_wizard_complete", 0)
+		frappe.db.set_value("Site", site.name, "database_name", None)
+		frappe.db.set_value("Site", site.name, "additional_system_user_created", False)
+		is_unified_server = frappe.db.get_value("Server", site.server, "is_unified_server")
+		# Only noticed this on unified servers
+		if is_unified_server:
+			Agent(site.server).create_database_access_credentials(
+				site=site
+			)  # In case the permissions are missing correct them
 
 
 def process_migrate_site_job_update(job):
@@ -4625,6 +4653,7 @@ class SiteToArchive(frappe._dict):
 	plan: str
 	team: str
 	bench: str
+	offsite_backups: DF.Check
 
 
 def get_suspended_time(site: str):
@@ -4650,7 +4679,7 @@ def archive_suspended_site(site_dict: SiteToArchive):
 
 	site = Site("Site", site_dict.name)
 	# take an offsite backup before archive
-	if site.plan == "USD 10" and not site.recent_offsite_backup_exists:
+	if not site_dict.offsite_backups and not site.recent_offsite_backup_exists:
 		if not site.recent_offsite_backup_pending:
 			site.backup(with_files=True, offsite=True)
 		return  # last backup ongoing
@@ -4660,18 +4689,24 @@ def archive_suspended_site(site_dict: SiteToArchive):
 def archive_suspended_sites():
 	archive_at_once = 4
 
-	filters = [
-		["status", "=", "Suspended"],
-		["trial_end_date", "is", "not set"],
-		["plan", "!=", "ERPNext Trial"],
-	]
+	sites = frappe.qb.DocType("Site")
+	site_plans = frappe.qb.DocType("Site Plan")
 
-	sites = frappe.db.get_all(
-		"Site", filters=filters, fields=["name", "team", "plan", "bench"], order_by="creation asc"
+	sites_to_drop = (
+		frappe.qb.from_(sites)
+		.join(site_plans)
+		.on(sites.plan == site_plans.name)
+		.where(
+			(sites.status == "Suspended") & (sites.trial_end_date.isnull()) & (site_plans.is_trial_plan == 0)
+		)
+		.select(sites.name, sites.team, sites.plan, sites.bench, site_plans.offsite_backups)
+		.orderby(sites.creation, order=frappe.qb.asc)
+		.limit(archive_at_once)
+		.run(as_dict=True)
 	)
 
 	archived_now = 0
-	for site_dict in sites:
+	for site_dict in sites_to_drop:
 		try:
 			if archived_now > archive_at_once:
 				break

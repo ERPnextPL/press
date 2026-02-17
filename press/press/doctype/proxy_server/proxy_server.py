@@ -12,10 +12,6 @@ from press.runner import Ansible
 from press.security import fail2ban
 from press.utils import log_error
 
-if TYPE_CHECKING:
-	from press.press.doctype.bench.bench import Bench
-	from press.press.doctype.root_domain.root_domain import RootDomain
-
 
 class ProxyServer(BaseServer):
 	# begin: auto-generated types
@@ -162,6 +158,9 @@ class ProxyServer(BaseServer):
 
 	@frappe.whitelist()
 	def setup_ssh_proxy(self):
+		if not self.ssh_certificate_authority:
+			frappe.throw("SSH Certificate Authority is required to setup SSH Proxy")
+
 		frappe.enqueue_doc(self.doctype, self.name, "_setup_ssh_proxy", queue="long", timeout=1200)
 
 	def _setup_ssh_proxy(self):
@@ -354,117 +353,19 @@ class ProxyServer(BaseServer):
 
 	@frappe.whitelist()
 	def trigger_failover(self):
+		# TODO: should also be automatic based on monitoring/some kind of health check mechanism
 		if self.is_primary:
-			return
-		self.status = "Installing"
-		self.save()
-		frappe.enqueue_doc(self.doctype, self.name, "_trigger_failover", queue="long", timeout=3600)
+			return None
 
-	def stop_primary(self):
-		primary = frappe.get_doc("Proxy Server", self.primary)
-		try:
-			ansible = Ansible(
-				playbook="failover_prepare_primary_proxy.yml",
-				server=primary,
-				user=primary._ssh_user(),
-				port=primary._ssh_port(),
-			)
-			ansible.run()
-		except Exception:
-			pass  # may be unreachable
+		failover = frappe.get_doc(
+			{
+				"doctype": "Proxy Failover",
+				"primary": self.primary,
+				"secondary": self.name,
+			}
+		).insert()
 
-	def forward_jobs_to_secondary(self):
-		frappe.db.set_value(
-			"Agent Job",
-			{"server": self.primary, "status": "Undelivered"},
-			"server",
-			self.name,
-		)
-
-	def move_wildcard_domains_from_primary(self):
-		frappe.db.set_value(
-			"Proxy Server Domain",
-			{"parent": self.primary},
-			"parent",
-			self.name,
-		)
-
-	def remove_primarys_access(self):
-		ansible = Ansible(
-			playbook="failover_remove_primary_access.yml",
-			server=self,
-			user=self._ssh_user(),
-			port=self._ssh_port(),
-			variables={
-				"primary_public_key": frappe.db.get_value("Proxy Server", self.primary, "frappe_public_key")
-			},
-		)
-		ansible.run()
-
-	def up_secondary(self):
-		ansible = Ansible(
-			playbook="failover_up_secondary_proxy.yml",
-			server=self,
-			user=self._ssh_user(),
-			port=self._ssh_port(),
-		)
-		ansible.run()
-
-	def update_dns_records_for_all_sites(self):
-		from itertools import groupby
-
-		servers = frappe.get_all("Server", {"proxy_server": self.primary}, pluck="name")
-		sites_domains = frappe.get_all(
-			"Site",
-			{"status": ("!=", "Archived"), "server": ("in", servers)},
-			["name", "domain"],
-			order_by="domain",
-		)
-		for domain_name, sites in groupby(sites_domains, lambda x: x["domain"]):
-			domain: RootDomain = frappe.get_doc("Root Domain", domain_name)
-			domain.update_dns_records_for_sites([site.name for site in sites], self.name)
-
-	def _trigger_failover(self):
-		try:
-			self.update_dns_records_for_all_sites()
-			self.stop_primary()
-			self.remove_primarys_access()
-			self.forward_jobs_to_secondary()
-			self.up_secondary()
-			self.update_app_servers()
-			self.move_wildcard_domains_from_primary()
-			self.switch_primary()
-			self.add_ssh_users_for_existing_benches()
-		except Exception:
-			self.status = "Broken"
-			log_error("Proxy Server Failover Exception", doc=self)
-		self.save()
-
-	def add_ssh_users_for_existing_benches(self):
-		benches = frappe.qb.DocType("Bench")
-		servers = frappe.qb.DocType("Server")
-		active_benches = (
-			frappe.qb.from_(benches)
-			.join(servers)
-			.on(servers.name == benches.server)
-			.select(benches.name)
-			.where(servers.proxy_server == self.primary)
-			.where(benches.status == "Active")
-			.run(as_dict=True)
-		)
-		for bench_name in active_benches:
-			bench: "Bench" = frappe.get_doc("Bench", bench_name)
-			bench.add_ssh_user()
-
-	def update_app_servers(self):
-		frappe.db.set_value("Server", {"proxy_server": self.primary}, "proxy_server", self.name)
-
-	def switch_primary(self):
-		frappe.db.set_value("Proxy Server", self.primary, "is_primary", False)
-		self.is_primary = True
-		self.is_replication_setup = False
-		self.primary = None
-		self.status = "Active"
+		return f"Failover Reference: {frappe.get_desk_link(failover.doctype, failover.name)}"
 
 	@frappe.whitelist()
 	def setup_proxysql_monitor(self):
@@ -576,6 +477,45 @@ class ProxyServer(BaseServer):
 			ansible.run()
 		except Exception:
 			log_error("Wireguard Setup Exception", server=self.as_dict())
+
+	@frappe.whitelist()
+	def pre_failover_tasks(self):
+		from press.press.doctype.proxy_failover.proxy_failover import reduce_ttl_of_sites
+
+		primary = frappe.db.get_value("Proxy Server", self.primary, ["cluster", "is_static_ip"], as_dict=True)
+		if self.cluster != primary.cluster:
+			frappe.throw("Failover can only be initiated between Proxy Servers in the same cluster")
+
+		if (not primary.is_static_ip and not self.is_static_ip) or (
+			primary.is_static_ip and self.is_static_ip
+		):
+			frappe.throw("Failover can only be initiated if one of the proxy server has a static ip")
+
+		frappe.get_doc(
+			{
+				"doctype": "Dashboard Banner",
+				"enabled": 1,
+				"type": "Warning",
+				"title": f"Proxy Failover Pre Warning - {self.primary}",
+				"message": f"There is currently an issue with the proxy server in {self.cluster} region. You may experience some interruptions while accessing your sites in that region. Our team is working to resolve this as quickly as possible.",
+				"is_scheduled": 1,
+				"scheduled_start_time": frappe.utils.now(),
+				"scheduled_end_time": frappe.utils.add_to_date(frappe.utils.now(), hours=10),
+				"is_global": 1,
+			}
+		).insert()
+
+		frappe.enqueue(
+			reduce_ttl_of_sites,
+			primary_proxy_name=self.primary,
+			secondary_proxy_name=self.name,
+			queue="long",
+			timeout=3600,
+			enqueue_after_commit=True,
+			at_front=True,
+		)
+
+		return "Added a dashboard banner and queued reduction of dns record ttl on sites"
 
 
 def process_update_nginx_job_update(job):

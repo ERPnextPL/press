@@ -27,4 +27,11 @@ export function dayjsIST(dateTimeString) {
 	return dayjs(dateTimeString).tz('Europe/Warsaw');
 }
 
+export function dayjsFloorToMinutes(d, interval) {
+	const minutes = d.minute();
+	const floored = Math.floor(minutes / interval) * interval;
+
+	return d.minute(floored).second(0).millisecond(0);
+}
+
 export default dayjs;

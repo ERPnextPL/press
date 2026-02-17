@@ -1553,7 +1553,12 @@ class BaseServer(Document, TagHelpers):
 	@property
 	def real_ram(self):
 		"""Ram detected by OS after h/w reservation"""
-		return 0.972 * self.ram - 218
+		real_ram = 0.972 * self.ram - 218
+
+		if hasattr(self, "is_unified_server") and self.is_unified_server:
+			return real_ram / 2
+
+		return real_ram
 
 	@frappe.whitelist()
 	def reboot_with_serial_console(self):
@@ -2189,6 +2194,11 @@ node_filesystem_avail_bytes{{instance="{self.name}", mountpoint="{mountpoint}"}}
 			log_error("Sever File Copy Exception", server=self.as_dict())
 
 	@frappe.whitelist()
+	def setup_logrotate(self):
+		"""Setup monitor json & mariadb logrotate"""
+		frappe.enqueue_doc(self.doctype, self.name, "_setup_logrotate", queue="long", timeout=1200)
+
+	@frappe.whitelist()
 	def install_cadvisor(self):
 		frappe.enqueue_doc(self.doctype, self.name, "_install_cadvisor")
 
@@ -2217,6 +2227,7 @@ node_filesystem_avail_bytes{{instance="{self.name}", mountpoint="{mountpoint}"}}
 		self.setup_ncdu()
 		self.setup_iptables()
 		self.install_cadvisor()
+		self.setup_logrotate()  # Logrotate monitor json
 
 		# Database Server specific config
 		database_server: DatabaseServer = frappe.get_doc("Database Server", self.database_server)
@@ -2227,7 +2238,7 @@ node_filesystem_avail_bytes{{instance="{self.name}", mountpoint="{mountpoint}"}}
 
 		database_server.adjust_memory_config()
 		database_server.provide_frappe_user_du_and_find_permission()
-		database_server.setup_logrotate()
+		database_server.setup_logrotate()  # Logrotate mariadb logs
 		database_server.setup_user_lingering()
 
 		self.validate_mounts()
@@ -2248,10 +2259,13 @@ node_filesystem_avail_bytes{{instance="{self.name}", mountpoint="{mountpoint}"}}
 			for var_name in default_variables:
 				var: MariaDBVariable = frappe.get_doc("MariaDB Variable", var_name)
 				var.set_on_server(self)
+			if self.has_data_volume:
+				self.add_or_update_mariadb_variable("tmpdir", "value_str", "/opt/volumes/mariadb/tmp")
 
 		self.set_swappiness()
 		self.add_glass_file()
 		self.install_filebeat()
+		self.setup_logrotate()
 
 		if self.doctype == "Server":
 			self.install_nfs_common()
@@ -2274,7 +2288,6 @@ node_filesystem_avail_bytes{{instance="{self.name}", mountpoint="{mountpoint}"}}
 		if self.doctype == "Database Server":
 			self.adjust_memory_config()
 			self.provide_frappe_user_du_and_find_permission()
-			self.setup_logrotate()
 			self.setup_user_lingering()
 
 			if self.has_data_volume:
@@ -2313,7 +2326,7 @@ node_filesystem_avail_bytes{{instance="{self.name}", mountpoint="{mountpoint}"}}
 	def setup_wildcard_hosts(self):
 		agent = Agent(self.name, server_type=self.doctype)
 		wildcards = self.get_wildcard_domains()
-		agent.setup_wildcard_hosts(wildcards)
+		return agent.setup_wildcard_hosts(wildcards)
 
 	@property
 	def bastion_host(self):
@@ -2618,6 +2631,18 @@ class Server(BaseServer):
 		"""Drop secondary server"""
 		server: "Server" = frappe.get_doc("Server", self.secondary_server)
 		server.archive()
+
+	def _setup_logrotate(self):
+		try:
+			ansible = Ansible(
+				playbook="rotate_monitor_json_logs.yml",
+				server=self,
+				user=self._ssh_user(),
+				port=self._ssh_port(),
+			)
+			ansible.run()
+		except Exception:
+			log_error("Logrotate Setup Exception", server=self.as_dict())
 
 	@dashboard_whitelist()
 	@frappe.whitelist()
