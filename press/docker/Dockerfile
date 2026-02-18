@@ -263,8 +263,7 @@ COPY --chown=frappe:frappe .vimrc /home/frappe/.vimrc
 COPY --chown=frappe:frappe common_site_config.json /home/frappe/frappe-bench/sites/common_site_config.json
 
 # Pass control of get-app to a python file
-COPY get_cached_app.py /usr/local/bin/get_cached_app.py
-RUN chmod +x /usr/local/bin/get_cached_app.py
+COPY --chmod=755 get_cached_app.py /usr/local/bin/get_cached_app.py
 
 # Install other apps
 {% for app in doc.apps %}
@@ -284,7 +283,9 @@ RUN --mount=type=bind,source=apps/{{ app.app }},target=/home/frappe/context/apps
 {% else %}
 RUN --mount=type=cache,sharing=locked,target=/home/frappe/.cache,uid=1000,gid=1000 \
     --mount=type=bind,source=apps/{{ app.app }},target=/home/frappe/context/apps/{{ app.app }} \
-    bench get-app file:///home/frappe/context/apps/{{ app.app }} \
+    git config --global --add safe.directory /home/frappe/context/apps/{{ app.app }} \
+    && git config --global --add safe.directory /home/frappe/context/apps/{{ app.app }}/.git \
+    && bench get-app file:///home/frappe/context/apps/{{ app.app }} \
     `#stage-apps-{{ app.app }}`
 {% endif %}
 
