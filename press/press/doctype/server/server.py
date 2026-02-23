@@ -186,7 +186,7 @@ class BaseServer(Document, TagHelpers):
 			["price_inr", "price_usd"],
 			as_dict=True,
 		)
-		doc.usage = usage(self.name)
+		doc.usage = usage(self.name, server_type=self.doctype)
 		doc.actions = self.get_actions()
 
 		if not self.is_self_hosted:

@@ -323,8 +323,8 @@ def get_cpu_and_memory_usage(name: str, time_range: str = "4m") -> dict[str, flo
 
 @frappe.whitelist()
 @protected(["Server", "Database Server"])
-def usage(name):
-	mount_point = get_mount_point(name)
+def usage(name, server_type=None):
+	mount_point = get_mount_point(name, server_type)
 	# 	  (
 	#       (count(count by (cpu) (node_cpu_seconds_total{instance="fs22-mumbai.frappe.cloud",job="node"})))
 	#     -
