@@ -1438,11 +1438,8 @@ def archive_obsolete_benches_for_server(benches: Iterable[BenchesToArchive]):
 
 
 def sync_benches():
-	print("sync_benches: start")
 	benches = frappe.get_all("Bench", {"status": "Active"}, pluck="name")
-	print(f"sync_benches: active_benches={len(benches)}")
 	for bench in benches:
-		print(f"sync_benches: enqueue sync_bench for {bench}")
 		frappe.enqueue(
 			"press.press.doctype.bench.bench.sync_bench",
 			queue="sync",
@@ -1455,7 +1452,6 @@ def sync_benches():
 
 
 def sync_bench(name):
-	print(f"sync_bench: start name={name}")
 	bench = Bench("Bench", name)
 	try:
 		active_archival_jobs = frappe.get_all(
@@ -1470,10 +1466,8 @@ def sync_bench(name):
 			order_by="job_type",
 		)
 		if active_archival_jobs:
-			print(f"sync_bench: skipped name={bench.name} reason=active_archival_jobs")
 			return
 		bench.sync_info()
-		print(f"sync_bench: completed name={bench.name}")
 		frappe.db.commit()
 	except Exception:
 		log_error(
