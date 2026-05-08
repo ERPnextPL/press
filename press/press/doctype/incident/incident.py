@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import urllib.parse
 from base64 import b64encode
+from contextlib import suppress
 from datetime import timedelta
 from functools import cached_property
 from typing import TYPE_CHECKING
@@ -34,6 +35,9 @@ if TYPE_CHECKING:
 	from frappe.types import DF
 	from twilio.rest.api.v2010.account.call import CallInstance
 
+	from press.incident_management.doctype.incident_investigator.incident_investigator import (
+		IncidentInvestigator,
+	)
 	from press.press.doctype.alertmanager_webhook_log.alertmanager_webhook_log import AlertmanagerWebhookLog
 	from press.press.doctype.incident_settings.incident_settings import IncidentSettings
 	from press.press.doctype.incident_settings_self_hosted_user.incident_settings_self_hosted_user import (
@@ -45,6 +49,7 @@ if TYPE_CHECKING:
 	from press.press.doctype.monitor_server.monitor_server import MonitorServer
 	from press.press.doctype.press_settings.press_settings import PressSettings
 	from press.press.doctype.server.server import Server
+
 
 INCIDENT_ALERT = "Sites Down"  # TODO: make it a field or child table somewhere #
 INCIDENT_SCOPE = (
@@ -68,6 +73,9 @@ CALL_THRESHOLD_SECONDS_NIGHT = (
 CALL_REPEAT_INTERVAL_DAY = 15 * 60
 CALL_REPEAT_INTERVAL_NIGHT = 20 * 60
 
+INCIDENT_BANNER_TITLE = "Incident on server: {0}"
+INCIDENT_BANNER_MESSAGE = "There is an ongoing incident affecting sites on {0}."
+
 
 class Incident(WebsiteGenerator):
 	# begin: auto-generated types
@@ -87,12 +95,14 @@ class Incident(WebsiteGenerator):
 		alerts: DF.Table[IncidentAlerts]
 		called_customer: DF.Check
 		cluster: DF.Link | None
+		confirmed_at: DF.Datetime | None
 		corrective_suggestions: DF.Table[IncidentSuggestion]
 		description: DF.TextEditor | None
 		investigation: DF.Link | None
 		likely_cause: DF.Text | None
 		phone_call: DF.Check
 		preventive_suggestions: DF.Table[IncidentSuggestion]
+		resolved_at: DF.Datetime | None
 		resolved_by: DF.Link | None
 		resource: DF.DynamicLink | None
 		resource_type: DF.Link | None
@@ -127,30 +137,36 @@ class Incident(WebsiteGenerator):
 	def global_email_alerts_enabled(self) -> bool:
 		return bool(frappe.db.get_single_value("Incident Settings", "email_alerts", cache=True))
 
-	def after_insert(self):
-		"""
-		Start investigating the incident since we have already waited 5m before creating it
-		send sms and email notifications
-		"""
-		try:
+	def create_investigation_if_possible(self):
+		"""Investigations have a cool off period of 5m therefore consecutive incidents on the same server might not trigger investigations"""
+		with suppress(frappe.ValidationError):
 			incident_investigator = frappe.get_doc(
 				{"doctype": "Incident Investigator", "incident": self.name, "server": self.server}
 			)
 			incident_investigator.insert(ignore_permissions=True)
 			self.investigation = incident_investigator.name
 			self.save()
-		except frappe.ValidationError:
-			# Investigator in cool off period
-			pass
+
+	def after_insert(self):
+		"""
+		Start investigating the incident since we have already waited 5m before creating it
+		send sms and email notifications, also add a dashboard banner in case of insert taking users to the status page
+		"""
+		self.create_investigation_if_possible()
 		self.send_sms_via_twilio()
 		self.send_email_notification()
 		self.identify_affected_resource()
 
 	def on_update(self):
 		if self.has_value_changed("status"):
+			current_datetime = frappe.utils.now_datetime()
 			self.send_email_notification()
-			if self.status == "Confirmed" and not self.called_customer:
-				self.call_customers()
+			if self.status == "Resolved" or self.status == "Auto-Resolved":
+				self.db_set("resolved_at", current_datetime)
+			elif self.status == "Confirmed" and not self.confirmed_at:
+				self.db_set("confirmed_at", current_datetime)
+				if not self.called_customer:
+					self.call_customers()
 
 	def vcpu(self, server_type, server_name):
 		vm_name = str(frappe.db.get_value(server_type, server_name, "virtual_machine"))
@@ -713,6 +729,8 @@ Likely due to insufficient balance or incorrect credentials""",
 
 		server_title_encoded = urllib.parse.quote(server_title)
 
+		# TODO Better message for Disk Full incidents
+
 		press_public_base_url = frappe.utils.get_url()
 		twilio_client.calls.create(
 			url=f"{press_public_base_url}/api/method/press.api.message.confirmed_incident?server_title={server_title_encoded}",
@@ -804,6 +822,27 @@ Likely due to insufficient balance or incorrect credentials""",
 		)
 
 	@property
+	def waited_enough_for_investigator_reactions(self) -> bool:
+		"""Check if the investigator has taken any action"""
+		if not self.investigation:
+			return True
+
+		investigator: IncidentInvestigator = frappe.get_doc("Incident Investigator", self.investigation)
+		wait_time = get_wait_time_post_investigator_actions()
+		if investigator.status != "Completed":
+			return False
+
+		# Investigation is completed and actions are taken wait before calling
+		if (
+			investigator.status == "Completed"
+			and investigator.action_steps
+			and (investigator.modified > frappe.utils.now_datetime() - timedelta(seconds=wait_time))
+		):
+			return False
+
+		return True
+
+	@property
 	def time_to_call_for_help(self) -> bool:
 		return self.status == "Confirmed" and frappe.utils.now_datetime() - self.creation > timedelta(
 			seconds=get_confirmation_threshold_duration() + get_call_threshold_duration()
@@ -834,6 +873,10 @@ def get_confirmation_threshold_duration():
 		cint(frappe.db.get_value("Incident Settings", None, "confirmation_threshold_night"))
 		or CONFIRMATION_THRESHOLD_SECONDS_NIGHT
 	)
+
+
+def get_wait_time_post_investigator_actions() -> int:
+	return cint(frappe.db.get_single_value("Incident Settings", "wait_time_post_investigator_actions") or 5)
 
 
 def get_call_threshold_duration():
@@ -885,11 +928,17 @@ def resolve_incidents():
 		pluck="name",
 	)
 	for incident_name in ongoing_incidents:
-		incident = Incident("Incident", incident_name)
-		incident.check_resolved()
-		if incident.time_to_call_for_help or incident.time_to_call_for_help_again:
-			incident.create_log_for_server()
-			incident.call_humans()
+		try:
+			incident = Incident("Incident", incident_name)
+			incident.check_resolved()
+			if (
+				incident.time_to_call_for_help or incident.time_to_call_for_help_again
+			) and incident.waited_enough_for_investigator_reactions:
+				incident.create_log_for_server()
+				incident.call_humans()
+				frappe.db.commit()
+		except Exception:
+			log_error(f"Error while resolving incident {incident_name}")
 
 
 def notify_ignored_servers():

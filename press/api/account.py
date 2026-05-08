@@ -8,30 +8,27 @@ from typing import TYPE_CHECKING
 
 import frappe
 import frappe.utils
-import pyotp
+import pyotp  # type: ignore[import-not-found]
 from frappe import _
 from frappe.core.doctype.user.user import update_password
 from frappe.core.utils import find
 from frappe.exceptions import DoesNotExistError
-from frappe.query_builder.custom import GROUP_CONCAT
-from frappe.query_builder.functions import Count
 from frappe.rate_limiter import rate_limit
 from frappe.utils import cint, get_url
 from frappe.utils.data import sha256_hash
 from frappe.utils.oauth import get_oauth2_authorize_url, get_oauth_keys
 from frappe.utils.password import get_decrypted_password
 from frappe.website.utils import build_response
-from pypika.terms import ValueWrapper
 
-from press.api.site import protected
 from press.guards import mfa
-from press.guards.role_guard import skip_roles
+from press.guards.role_guard import roles_enabled, skip_roles
 from press.press.doctype.team.team import (
 	Team,
 	get_child_team_members,
 	get_team_members,
 )
 from press.utils import get_country_info, get_current_team, is_user_part_of_team, log_error
+from press.utils import user as user_utils
 from press.utils.telemetry import capture
 
 if TYPE_CHECKING:
@@ -159,7 +156,7 @@ def resend_otp(account_request: str, for_2fa_keys: bool = False):
 def send_otp(email: str, for_2fa_keys: bool = False):
 	account_request = frappe.db.get_value("Account Request", {"email": email}, "name")
 
-	if not account_request:
+	if not account_request or (account_request and not frappe.db.exists("User", email)):
 		frappe.throw("Please sign up first")
 
 	account_request_doc: "AccountRequest" = frappe.get_doc("Account Request", account_request)
@@ -271,6 +268,11 @@ def accept_team_invite(key: str):
 	if not account_request.invited_by:
 		frappe.throw("You are not invited by any team")
 
+	if frappe.session.user != account_request.email:
+		frappe.throw(
+			"This invite can't be accepted with the current account. Please sign in with the invited account or request a new invite."
+		)
+
 	team = account_request.team
 	first_name = account_request.first_name
 	last_name = account_request.last_name
@@ -279,8 +281,10 @@ def accept_team_invite(key: str):
 	role = account_request.role
 	press_roles = account_request.press_roles
 
-	team_doc = frappe.get_doc("Team", team)
-	return team_doc.create_user_for_member(first_name, last_name, email, password, role, press_roles)
+	team_doc = frappe.get_doc("Team", team, ignore_permissions=True)
+	team_doc.create_user_for_member(
+		first_name, last_name, email, password, role, press_roles, skip_validations=True
+	)
 
 
 @frappe.whitelist(allow_guest=True)
@@ -433,7 +437,7 @@ def validate_request_key(key, timezone=None):
 			"first_name": account_request.first_name,
 			"last_name": account_request.last_name,
 			"country": possible_country,
-			"countries": frappe.db.get_all("Country", pluck="name"),
+			"countries": get_countries_with_isd_codes(),
 			"user_exists": frappe.db.exists("User", account_request.email),
 			"team": account_request.team,
 			"is_invitation": frappe.db.get_value("Team", account_request.team, "enabled"),
@@ -449,6 +453,33 @@ def validate_request_key(key, timezone=None):
 		}
 
 	return None
+
+
+def get_countries_with_isd_codes():
+	"""Get list of countries with their ISD codes from Frappe's country_info."""
+	import phonenumbers
+	from frappe.geo.country_info import get_all as get_country_data
+
+	country_data = get_country_data()
+	countries = []
+	for name, info in country_data.items():
+		code = info.get("code", "")
+		example = ""
+		if code:
+			try:
+				num = phonenumbers.example_number_for_type(code.upper(), phonenumbers.PhoneNumberType.MOBILE)
+				example = phonenumbers.national_significant_number(num)
+			except Exception:
+				pass
+		countries.append(
+			{
+				"name": name,
+				"code": code,
+				"isd": info.get("isd", ""),
+				"example": example,
+			}
+		)
+	return sorted(countries, key=lambda x: x["name"])
 
 
 @frappe.whitelist(allow_guest=True)
@@ -540,7 +571,6 @@ def _get():
 		"partner_email": team_doc.partner_email or "",
 		"partner_billing_name": partner_billing_name,
 		"number_of_sites": number_of_sites,
-		"permissions": get_permissions(),
 		"billing_info": team_doc.billing_info(),
 	}
 
@@ -554,32 +584,6 @@ def current_team():
 	from press.api.client import get
 
 	return get("Team", frappe.local.team().name)
-
-
-def get_permissions():
-	user = frappe.session.user
-	groups = tuple(
-		[*frappe.get_all("Press Permission Group User", {"user": user}, pluck="parent"), "1", "2"]
-	)  # [1, 2] is for avoiding singleton tuples
-	docperms = frappe.db.sql(
-		f"""
-			SELECT `document_name`, GROUP_CONCAT(`action`) as `actions`
-			FROM `tabPress User Permission`
-			WHERE user='{user}' or `group` in {groups}
-			GROUP BY `document_name`
-		""",
-		as_dict=True,
-	)
-	return {perm.document_name: perm.actions.split(",") for perm in docperms if perm.actions}
-
-
-@frappe.whitelist()
-def has_method_permission(doctype, docname, method) -> bool:
-	from press.press.doctype.press_permission_group.press_permission_group import (
-		has_method_permission,
-	)
-
-	return has_method_permission(doctype, docname, method)
 
 
 @frappe.whitelist(allow_guest=True)
@@ -1020,21 +1024,17 @@ def mark_key_as_default(key_name):
 	key.save()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_api_secret():
 	user = frappe.get_doc("User", frappe.session.user)
-
-	api_key = user.api_key
+	user.api_key = user.api_key or frappe.generate_hash()
 	api_secret = frappe.generate_hash()
-
-	if not api_key:
-		api_key = frappe.generate_hash()
-		user.api_key = api_key
-
 	user.api_secret = api_secret
 	user.save(ignore_permissions=True)
-
-	return {"api_key": api_key, "api_secret": api_secret}
+	return {
+		"api_key": user.api_key,
+		"api_secret": api_secret,
+	}
 
 
 @frappe.whitelist()
@@ -1069,182 +1069,67 @@ def fuse_list():
 	return frappe.db.sql(query, as_dict=True)
 
 
-# Permissions
-@frappe.whitelist()
-def get_permission_options(name, ptype):
-	"""
-	[{'doctype': 'Site', 'name': 'ccc.frappe.cloud', title: '', 'perms': 'press.api.site.get'}, ...]
-	"""
-	from press.press.doctype.press_method_permission.press_method_permission import (
-		available_actions,
-	)
-
-	doctypes = frappe.get_all("Press Method Permission", pluck="document_type", distinct=True)
-
-	options = []
-	for doctype in doctypes:
-		doc = frappe.qb.DocType(doctype)
-		perm_doc = frappe.qb.DocType("Press User Permission")
-		subtable = (
-			frappe.qb.from_(perm_doc)
-			.select("*")
-			.where((perm_doc.user if ptype == "user" else perm_doc.group) == name)
-		)
-
-		query = (
-			frappe.qb.from_(doc)
-			.left_join(subtable)
-			.on(doc.name == subtable.document_name)
-			.select(
-				ValueWrapper(doctype, alias="doctype"),
-				doc.name,
-				doc.title if doctype != "Site" else None,
-				GROUP_CONCAT(subtable.action, alias="perms"),
-			)
-			.where(
-				(doc.team == get_current_team())
-				& ((doc.enabled == 1) if doctype == "Release Group" else (doc.status != "Archived"))
-			)
-			.groupby(doc.name)
-		)
-		options += query.run(as_dict=True)
-
-	return {"options": options, "actions": available_actions()}
-
-
-@frappe.whitelist()
-def update_permissions(user, ptype, updated):
-	values = []
-	drop = []
-
-	for doctype, docs in updated.items():
-		for doc, updated_perms in docs.items():
-			ptype_cap = ptype.capitalize()
-			old_perms = frappe.get_all(
-				"Press User Permission",
-				filters={
-					"type": ptype_cap,
-					ptype: user,
-					"document_type": doctype,
-					"document_name": doc,
-				},
-				pluck="action",
-			)
-			# perms to insert
-			add = set(updated_perms).difference(set(old_perms))
-			values += [(frappe.generate_hash(4), ptype_cap, doctype, doc, user, a) for a in add]
-
-			# perms to remove
-			remove = set(old_perms).difference(set(updated_perms))
-			drop += frappe.get_all(
-				"Press User Permission",
-				filters={
-					"type": ptype_cap,
-					ptype: user,
-					"document_type": doctype,
-					"document_name": doc,
-					"action": ("in", remove),
-				},
-				pluck="name",
-			)
-
-	if values:
-		frappe.db.bulk_insert(
-			"Press User Permission",
-			fields=["name", "type", "document_type", "document_name", ptype, "action"],
-			values=set(values),
-			ignore_duplicates=True,
-		)
-	if drop:
-		frappe.db.delete("Press User Permission", {"name": ("in", drop)})
-	frappe.db.commit()
-
-
-@frappe.whitelist()
-def groups():
-	return frappe.get_all("Press Permission Group", {"team": get_current_team()}, ["name", "title"])
-
-
-@frappe.whitelist()
-def permission_group_users(name):
-	if get_current_team() != frappe.db.get_value("Press Permission Group", name, "team"):
-		frappe.throw("You are not allowed to view this group")
-
-	return frappe.get_all("Press Permission Group User", {"parent": name}, pluck="user")
-
-
-@frappe.whitelist()
-def add_permission_group(title):
-	doc = frappe.get_doc(
-		{"doctype": "Press Permission Group", "team": get_current_team(), "title": title}
-	).insert(ignore_permissions=True)
-	return {"name": doc.name, "title": doc.title}
-
-
-@frappe.whitelist()
-@protected("Press Permission Group")
-def remove_permission_group(name):
-	frappe.db.delete("Press User Permission", {"group": name})
-	frappe.delete_doc("Press Permission Group", name)
-
-
-@frappe.whitelist()
-@protected("Press Permission Group")
-def add_permission_group_user(name, user):
-	doc = frappe.get_doc("Press Permission Group", name)
-	doc.append("users", {"user": user})
-	doc.save(ignore_permissions=True)
-
-
-@frappe.whitelist()
-@protected("Press Permission Group")
-def remove_permission_group_user(name, user):
-	doc = frappe.get_doc("Press Permission Group", name)
-	for group_user in doc.users:
-		if group_user.user == user:
-			doc.remove(group_user)
-			doc.save(ignore_permissions=True)
-			break
-
-
-def has_user_permission(key: str):
-	PressRole = frappe.qb.DocType("Press Role")
-	PressRoleUser = frappe.qb.DocType("Press Role User")
-	return (
-		frappe.qb.from_(PressRole)
-		.inner_join(PressRoleUser)
-		.on(PressRoleUser.parent == PressRole.name)
-		.select(Count(PressRole.name).as_("count"))
-		.where(PressRole.team == get_current_team())
-		.where(PressRole[key] == 1)
-		.where(PressRoleUser.user == frappe.session.user)
-		.run(as_dict=True)
-		.pop()
-		.get("count")
-		> 0
-	)
-
-
 @frappe.whitelist()
 def user_permissions():
 	team = get_current_team(get_doc=True)
+	cache_key = ".".join(("user_permissions", str(team.name), str(frappe.session.user)))
+	if frappe.cache.exists(cache_key):
+		return frappe.cache.get_value(cache_key)
+	PressRole = frappe.qb.DocType("Press Role")
+	PressRoleUser = frappe.qb.DocType("Press Role User")
+	permission_fields = [
+		"admin_access",
+		"allow_billing",
+		"allow_webhook_configuration",
+		"allow_apps",
+		"allow_partner",
+		"allow_dashboard",
+		"allow_leads",
+		"allow_customer",
+		"allow_contribution",
+		"allow_site_creation",
+		"allow_bench_creation",
+		"allow_server_creation",
+	]
+	select_fields = [PressRole.name] + [PressRole[field] for field in permission_fields]
+	result = (
+		frappe.qb.from_(PressRole)
+		.inner_join(PressRoleUser)
+		.on(PressRoleUser.parent == PressRole.name)
+		.select(*select_fields)
+		.where(PressRole.team == team.name)
+		.where(PressRoleUser.user == frappe.session.user)
+		.run(as_dict=True)
+	)
+	permissions = {field: 0 for field in permission_fields}
+	for row in result:
+		for field in permission_fields:
+			permissions[field] = permissions[field] or row.get(field, 0)
 	is_owner = team.user == frappe.session.user
-	is_admin = is_owner or skip_roles() or has_user_permission("admin_access")
-	return {
+	is_admin = (
+		is_owner
+		or (not roles_enabled())
+		or skip_roles()
+		or permissions["admin_access"]
+		or user_utils.is_system_manager()
+	)
+	result = {
 		"owner": is_owner,
 		"admin": is_admin,
-		"billing": is_admin or has_user_permission("allow_billing"),
-		"webhook": is_admin or has_user_permission("allow_webhook_configuration"),
-		"apps": is_admin or has_user_permission("allow_apps"),
-		"partner": is_admin or has_user_permission("allow_partner"),
-		"partner_dashboard": is_admin or has_user_permission("allow_dashboard"),
-		"partner_leads": is_admin or has_user_permission("allow_leads"),
-		"partner_customer": is_admin or has_user_permission("allow_customer"),
-		"partner_contribution": is_admin or has_user_permission("allow_contribution"),
-		"site_creation": is_admin or has_user_permission("allow_site_creation"),
-		"bench_creation": is_admin or has_user_permission("allow_bench_creation"),
-		"server_creation": is_admin or has_user_permission("allow_server_creation"),
+		"billing": is_admin or permissions["allow_billing"],
+		"webhook": is_admin or permissions["allow_webhook_configuration"],
+		"apps": is_admin or permissions["allow_apps"],
+		"partner": is_admin or permissions["allow_partner"],
+		"partner_dashboard": is_admin or permissions["allow_dashboard"],
+		"partner_leads": is_admin or permissions["allow_leads"],
+		"partner_customer": is_admin or permissions["allow_customer"],
+		"partner_contribution": is_admin or permissions["allow_contribution"],
+		"site_creation": is_admin or permissions["allow_site_creation"],
+		"bench_creation": is_admin or permissions["allow_bench_creation"],
+		"server_creation": is_admin or permissions["allow_server_creation"],
 	}
+	frappe.cache.set_value(cache_key, result, expires_in_sec=60 * 5)
+	return result
 
 
 @frappe.whitelist()
@@ -1452,23 +1337,63 @@ def reset_2fa_recovery_codes():
 def get_user_banners():
 	team = get_current_team()
 
-	# fetch sites + servers for this team
-	site_server_pairs = frappe.get_all(
-		"Site",
-		filters={"team": team},
-		fields=["name", "server"],
-	)
+	Site = frappe.qb.DocType("Site")
+	Server = frappe.qb.DocType("Server")
 
-	sites = list(set([pair["name"] for pair in site_server_pairs]))
-	servers = list(set([pair["server"] for pair in site_server_pairs if pair.get("server")]))
+	user_sites = (
+		frappe.qb.from_(Site)
+		.select(Site.name, Site.server, Site.cluster)
+		.where((Site.team == team) & Site.status.notin(["Archived", "Suspended"]))
+	).run(as_dict=True)
+
+	user_servers = (
+		frappe.qb.from_(Server)
+		.select(Server.name, Server.cluster)
+		.where(
+			Server.status.notin(["Archived"])
+			& (
+				(Server.team == team)
+				| (
+					Server.name.isin(
+						[site.get("server") for site in user_sites if site.get("server")] or [""]
+					)
+				)
+			)
+		)
+	).run(as_dict=True)
+
+	user_clusters = [
+		resource.get("cluster") for resource in [*user_sites, *user_servers] if resource.get("cluster")
+	]
+
+	# flatten for easy access
+	user_sites = [site.get("name") for site in user_sites]
+	user_servers = [server.get("name") for server in user_servers]
 
 	DashboardBanner = frappe.qb.DocType("Dashboard Banner")
+	DashboardBannerTeam = frappe.qb.DocType("Dashboard Banner Team")
+	DashboardBannerSite = frappe.qb.DocType("Dashboard Banner Site")
+	DashboardBannerServer = frappe.qb.DocType("Dashboard Banner Server")
+	DashboardBannerCluster = frappe.qb.DocType("Dashboard Banner Cluster")
 	now = frappe.utils.now()
 
 	# fetch all enabled banners for this user
 	all_enabled_banners = (
 		frappe.qb.from_(DashboardBanner)
-		.select("*")
+		.left_join(DashboardBannerTeam)
+		.on(DashboardBannerTeam.parent == DashboardBanner.name)
+		.left_join(DashboardBannerSite)
+		.on(DashboardBannerSite.parent == DashboardBanner.name)
+		.left_join(DashboardBannerServer)
+		.on(DashboardBannerServer.parent == DashboardBanner.name)
+		.left_join(DashboardBannerCluster)
+		.on(DashboardBannerCluster.parent == DashboardBanner.name)
+		.select(
+			DashboardBanner.star,
+			DashboardBannerServer.server,
+			DashboardBannerSite.site,
+			DashboardBannerCluster.cluster,
+		)
 		.where(
 			((DashboardBanner.enabled == 1) & (DashboardBanner.is_scheduled == 0))
 			| (
@@ -1480,12 +1405,68 @@ def get_user_banners():
 		)
 		.where(
 			(DashboardBanner.is_global == 1)
-			| ((DashboardBanner.type_of_scope == "Site") & (DashboardBanner.site.isin(sites or [""])))
-			| ((DashboardBanner.type_of_scope == "Server") & (DashboardBanner.server.isin(servers or [""])))
-			| ((DashboardBanner.type_of_scope == "Team") & (DashboardBanner.team == team))
+			| (
+				(DashboardBanner.type_of_scope == "Site")
+				& (DashboardBannerSite.site.isin(user_sites or [""]))
+			)
+			| (
+				(DashboardBanner.type_of_scope == "Server")
+				& (DashboardBannerServer.server.isin(user_servers or [""]))
+			)
+			| (
+				(DashboardBanner.type_of_scope == "Cluster")
+				& (DashboardBannerCluster.cluster.isin(user_clusters or [""]))
+			)
+			| ((DashboardBanner.type_of_scope == "Team") & (DashboardBannerTeam.team == team))
 		)
 		.run(as_dict=True)
 	)
+
+	banners = {}
+	for row in all_enabled_banners:
+		name = row["name"]
+
+		if name not in banners:
+			banners[name] = {
+				"name": name,
+				"type": row.get("type"),
+				"title": row.get("title"),
+				"message": row.get("message"),
+				"help_url": row.get("help_url"),
+				"has_action": row.get("has_action"),
+				"action_label": row.get("action_label"),
+				"action_script": row.get("action_script"),
+				"type_of_scope": row.get("type_of_scope"),
+				"is_dismissible": row.get("is_dismissible"),
+				"is_global": row.get("is_global"),
+				"cluster": [],
+				"server": [],
+				"site": [],
+			}
+
+		if row.get("server") and row["server"] not in banners[name]["server"]:
+			banners[name]["server"].append(row["server"])
+
+		if row.get("site") and row["site"] not in banners[name]["site"]:
+			banners[name]["site"].append(row["site"])
+
+		if row.get("cluster") and row["cluster"] not in banners[name]["cluster"]:
+			banners[name]["cluster"].append(row["cluster"])
+
+	all_enabled_banners = list(banners.values())
+
+	# [privacy] remove from payload: sites or private servers not owned by user
+	def remove_sensitive_info(banner: dict):
+		banner.update(
+			{
+				"site": list(set(user_sites) & set(banner.get("site", []) or [])),
+				"server": list(set(user_servers) & set(banner.get("server", []) or [])),
+				"cluster": list(set(user_clusters) & set(banner.get("cluster", []) or [])),
+			}
+		)
+		return banner
+
+	all_enabled_banners = [remove_sensitive_info(b) for b in all_enabled_banners]
 
 	# filter out dismissed banners
 	banner_dismissals_by_user = frappe.get_all(

@@ -93,8 +93,11 @@
 
 			<AnalyticsCard title="Uptime" @share-card="shareDashboard">
 				<SiteUptime
+					:site="name"
+					:timegrain="$resources.analytics?.data?.timegrain"
 					:data="$resources.analytics?.data?.uptime"
 					:loading="$resources.analytics.loading"
+					@datazoom="handleDataZoom"
 					class="h-[15.55rem] p-2 pb-3"
 				/>
 			</AnalyticsCard>
@@ -113,10 +116,11 @@
 				/>
 				<template #action>
 					<router-link
-						class="text-base text-gray-600 hover:text-gray-700"
+						class="text-sm text-ink-gray-7 hover:text-gray-700 flex items-center gap-1"
 						:to="{ name: 'Site Performance Request Logs' }"
 					>
-						Request Log Report →
+						Log Report
+						<LucideChevronRight class="size-4" />
 					</router-link>
 				</template>
 			</AnalyticsCard>
@@ -414,7 +418,7 @@
 			</AnalyticsCard>
 
 			<AnalyticsCard
-				class="sm:col-span-2"
+				class='sm:col-span-2 [&_[aria-label="Copy"]]:m-0'
 				title="Frequent Slow Queries"
 				@share-card="shareDashboard"
 			>
@@ -445,7 +449,7 @@
 			</AnalyticsCard>
 
 			<AnalyticsCard
-				class="sm:col-span-2"
+				class='sm:col-span-2 [&_[aria-label="Copy"]]:m-0'
 				title="Top Slow Queries"
 				@share-card="shareDashboard"
 			>
@@ -487,7 +491,6 @@ import BarChart from '@/components/charts/BarChart.vue';
 import SiteUptime from './SiteUptime.vue';
 import AlertBanner from '../AlertBanner.vue';
 import AnalyticsCard from './AnalyticsCard.vue';
-import ShareIcon from '../icons/ShareIcon.vue';
 import ActionButton from '../ActionButton.vue';
 import { h } from 'vue';
 
@@ -805,7 +808,7 @@ export default {
 			};
 		},
 		shareDashboardActionPrefix() {
-			return () => h(ShareIcon, { class: 'w-4 h-4' });
+			return () => h(LucideLink, { class: 'size-3.5' });
 		},
 	},
 	methods: {

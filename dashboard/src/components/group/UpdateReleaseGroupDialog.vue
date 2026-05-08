@@ -3,7 +3,7 @@
 		v-model="show"
 		:options="{
 			size: '4xl',
-			title: lastDeploy ? 'Update Bench Group' : 'Deploy Bench Group',
+			title: lastDeploy ? 'Update Bench' : 'Deploy Bench',
 		}"
 	>
 		<template #body-content>
@@ -21,6 +21,16 @@
 				"
 				class="mb-4"
 				title="A few commits have been yanked, <a href='https://docs.frappe.io/cloud/benches/updating_a_bench#yanked-app-releases' target='_blank' style='font-weight: bold;'>click here</a> to know more."
+				type="info"
+			/>
+			<AlertBanner
+				v-if="
+					benchDocResource.doc.deploy_information.apps.some((app) =>
+						app.releases.some((release) => release.is_mandatory),
+					)
+				"
+				class="mb-4"
+				title="A mandatory update is available. Please select the update to proceed."
 				type="info"
 			/>
 			<!-- Update Steps -->
@@ -186,7 +196,7 @@ export default {
 
 			appData.forEach((app) => {
 				if (!app.releases?.length) {
-					app.__disabled = true;
+					app.disabled = true;
 				}
 			});
 
@@ -246,6 +256,7 @@ export default {
 										value: release.name,
 										timestamp: release.timestamp,
 										is_yanked: release.is_yanked,
+										is_mandatory: release.is_mandatory,
 									};
 								});
 							}
@@ -537,16 +548,18 @@ export default {
 					}
 				},
 				onSuccess(candidate) {
-					this.$router.push({
-						name: 'Deploy Candidate',
-						params: {
-							id: candidate,
-							name: this.bench,
-						},
-					});
-					this.restrictMessage = '';
+					// Backward compatibility in case we switch to the older deploy flow which returns a candidate
+					if (candidate) {
+						this.$router.push({
+							name: 'Deploy Candidate',
+							params: {
+								id: candidate,
+								name: this.bench,
+							},
+						});
+					}
 					this.show = false;
-					this.$emit('success', candidate);
+					this.$emit('success', null);
 				},
 				onError: this.setErrorMessage.bind(this),
 			};
@@ -631,14 +644,16 @@ export default {
 					return {
 						app: app.name,
 						source: app.source,
-						release: app.releases.find(
-							(release) =>
-								release.name === app.next_release && !release.is_yanked,
-						)?.name,
-						hash: app.releases.find(
-							(release) =>
-								release.name === app.next_release && !release.is_yanked,
-						)?.hash,
+						release:
+							app.releases.find(
+								(release) =>
+									release.name === app.next_release && !release.is_yanked,
+							)?.name ?? app.next_release,
+						hash:
+							app.releases.find(
+								(release) =>
+									release.name === app.next_release && !release.is_yanked,
+							)?.hash ?? app.next_release_hash,
 					};
 				});
 		},

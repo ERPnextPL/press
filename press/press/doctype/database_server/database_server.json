@@ -22,6 +22,7 @@
   "is_self_hosted",
   "enable_physical_backup",
   "halt_agent_jobs",
+  "enable_schema_size_parser",
   "column_break_qsqm",
   "is_server_setup",
   "is_server_renamed",
@@ -38,6 +39,7 @@
   "auto_increase_storage",
   "networking_section",
   "ip",
+  "nat_server",
   "column_break_10",
   "private_ip",
   "private_mac_address",
@@ -76,6 +78,7 @@
   "column_break_eiyu",
   "memory_allocator",
   "memory_allocator_version",
+  "tcmalloc_release_rate",
   "section_break_ladc",
   "is_performance_schema_enabled",
   "mariadb_system_variables",
@@ -115,7 +118,13 @@
   "binlog_index_retention_days",
   "column_break_blnf",
   "enable_binlog_upload_to_s3",
-  "uploaded_binlogs_retention_days"
+  "uploaded_binlogs_retention_days",
+  "monitor_tab",
+  "is_mariadb_monitor_installed",
+  "section_break_uzkb",
+  "is_external_healthcheck_enabled",
+  "column_break_umtu",
+  "is_auto_coredump_enabled"
  ],
  "fields": [
   {
@@ -177,11 +186,11 @@
    "fieldname": "provider",
    "fieldtype": "Select",
    "label": "Provider",
-   "options": "Generic\nScaleway\nAWS EC2\nOCI\nHetzner\nVodacom\nDigitalOcean",
+   "options": "Generic\nScaleway\nAWS EC2\nOCI\nHetzner\nVodacom\nDigitalOcean\nFrappe Compute",
    "set_only_once": 1
   },
   {
-   "depends_on": "eval:[\"AWS EC2\", \"OCI\", \"Hetzner\", \"DigitalOcean\"].includes(doc.provider)",
+   "depends_on": "eval:[\"AWS EC2\", \"OCI\", \"Hetzner\", \"DigitalOcean\", \"Frappe Compute\"].includes(doc.provider)",
    "fieldname": "virtual_machine",
    "fieldtype": "Link",
    "label": "Virtual Machine",
@@ -773,6 +782,58 @@
    "fieldname": "is_provisioning_press_job_completed",
    "fieldtype": "Check",
    "label": "Is Provisioning Job Completed"
+  },
+  {
+   "default": "1",
+   "fieldname": "enable_schema_size_parser",
+   "fieldtype": "Check",
+   "label": "Enable Schema Size Parser"
+  },
+  {
+   "fieldname": "nat_server",
+   "fieldtype": "Link",
+   "label": "NAT Server",
+   "options": "NAT Server"
+  },
+  {
+   "default": "1",
+   "depends_on": "eval: doc.memory_allocator == \"TCMalloc\"",
+   "fieldname": "tcmalloc_release_rate",
+   "fieldtype": "Int",
+   "label": "TCMalloc Release Rate",
+   "read_only": 1
+  },
+  {
+   "fieldname": "monitor_tab",
+   "fieldtype": "Tab Break",
+   "label": "Monitor"
+  },
+  {
+   "default": "0",
+   "fieldname": "is_mariadb_monitor_installed",
+   "fieldtype": "Check",
+   "label": "Is MariaDB Monitor Installed",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_uzkb",
+   "fieldtype": "Section Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "is_external_healthcheck_enabled",
+   "fieldtype": "Check",
+   "label": "Is External Healthcheck Enabled"
+  },
+  {
+   "fieldname": "column_break_umtu",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "is_auto_coredump_enabled",
+   "fieldtype": "Check",
+   "label": "Is Auto Coredump Enabled"
   }
  ],
  "grid_page_length": 50,
@@ -789,7 +850,7 @@
    "link_fieldname": "database_server"
   }
  ],
- "modified": "2026-01-18 16:20:34.150871",
+ "modified": "2026-05-06 14:39:54.175744",
  "modified_by": "Administrator",
  "module": "Press",
  "name": "Database Server",

@@ -2,7 +2,7 @@
 # For license information, please see license.txt
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
 
 import frappe
 from frappe.utils import unique
@@ -16,6 +16,8 @@ from press.utils import log_error
 class ProxyServer(BaseServer):
 	# begin: auto-generated types
 	# This code is auto-generated. Do not modify anything in this block.
+
+	from typing import TYPE_CHECKING
 
 	if TYPE_CHECKING:
 		from frappe.types import DF
@@ -32,6 +34,7 @@ class ProxyServer(BaseServer):
 		domain: DF.Link | None
 		domains: DF.Table[ProxyServerDomain]
 		enabled_default_routing: DF.Check
+		exclude_from_auto_selection: DF.Check
 		frappe_public_key: DF.Code | None
 		frappe_user_password: DF.Password | None
 		halt_agent_jobs: DF.Check
@@ -46,13 +49,16 @@ class ProxyServer(BaseServer):
 		is_ssh_proxy_setup: DF.Check
 		is_static_ip: DF.Check
 		is_wireguard_setup: DF.Check
+		mem_limits: DF.Code | None
 		plan: DF.Link | None
 		primary: DF.Link | None
 		private_ip: DF.Data | None
 		private_ip_interface_id: DF.Data | None
 		private_mac_address: DF.Data | None
 		private_vlan_id: DF.Data | None
-		provider: DF.Literal["Generic", "Scaleway", "AWS EC2", "OCI", "Hetzner", "Vodacom", "DigitalOcean"]
+		provider: DF.Literal[
+			"Generic", "Scaleway", "AWS EC2", "OCI", "Hetzner", "Vodacom", "DigitalOcean", "Frappe Compute"
+		]
 		proxysql_admin_password: DF.Password | None
 		proxysql_monitor_password: DF.Password | None
 		public: DF.Check
@@ -64,6 +70,7 @@ class ProxyServer(BaseServer):
 		status: DF.Literal["Pending", "Installing", "Active", "Broken", "Archived"]
 		team: DF.Link | None
 		tls_certificate_renewal_failed: DF.Check
+		use_as_proxy_for_agent_and_metrics: DF.Check
 		virtual_machine: DF.Link | None
 		wireguard_interface_id: DF.Data | None
 		wireguard_network: DF.Data | None
@@ -77,6 +84,19 @@ class ProxyServer(BaseServer):
 		super().validate()
 		self.validate_domains()
 		self.validate_proxysql_admin_password()
+
+		if (
+			not frappe.db.get_value(
+				self.doctype,
+				{
+					"status": ["!=", "Archived"],
+					"cluster": self.cluster,
+					"use_as_proxy_for_agent_and_metrics": 1,
+				},
+			)
+			and self.status != "Archived"
+		):
+			self.use_as_proxy_for_agent_and_metrics = 1
 
 	def validate_domains(self):
 		domains_to_validate = unique([self.domain] + [row.domain for row in self.domains])
@@ -421,7 +441,7 @@ class ProxyServer(BaseServer):
 					"wireguard_network": self.wireguard_network_ip
 					+ "/"
 					+ self.wireguard_network.split("/")[1],
-					"interface_id": self.private_ip_interface_id,
+					"external_interface_id": self.private_ip_interface_id,
 					"wireguard_private_key": False,
 					"wireguard_public_key": False,
 					"peers": "",
@@ -468,7 +488,7 @@ class ProxyServer(BaseServer):
 					"wireguard_network": self.wireguard_network_ip
 					+ "/"
 					+ self.wireguard_network.split("/")[1],
-					"interface_id": self.private_ip_interface_id,
+					"external_interface_id": self.private_ip_interface_id,
 					"wireguard_private_key": self.get_password("wireguard_private_key"),
 					"wireguard_public_key": self.get_password("wireguard_public_key"),
 					"peers": json.dumps(peers),
@@ -496,11 +516,10 @@ class ProxyServer(BaseServer):
 				"doctype": "Dashboard Banner",
 				"enabled": 1,
 				"type": "Warning",
-				"title": f"Proxy Failover Pre Warning - {self.primary}",
 				"message": f"There is currently an issue with the proxy server in {self.cluster} region. You may experience some interruptions while accessing your sites in that region. Our team is working to resolve this as quickly as possible.",
 				"is_scheduled": 1,
 				"scheduled_start_time": frappe.utils.now(),
-				"scheduled_end_time": frappe.utils.add_to_date(frappe.utils.now(), hours=10),
+				"scheduled_end_time": frappe.utils.add_to_date(frappe.utils.now(), hours=6),
 				"is_global": 1,
 			}
 		).insert()
@@ -516,6 +535,70 @@ class ProxyServer(BaseServer):
 		)
 
 		return "Added a dashboard banner and queued reduction of dns record ttl on sites"
+
+	@frappe.whitelist()
+	def get_memory_limits(self):
+		if self.mem_limits:
+			return json.loads(self.mem_limits)
+		return None
+
+	@frappe.whitelist()
+	def setup_user_ssh_certificate(self):
+		frappe.enqueue_doc(self.doctype, self.name, "_setup_user_ssh_certificate", queue="long", timeout=1200)
+
+	def _setup_user_ssh_certificate(self):
+		try:
+			ansible = Ansible(
+				playbook="user_ssh_certificate.yml",
+				server=self,
+				user=self._ssh_user(),
+				port=self._ssh_port(),
+				variables={
+					"server": self.name,
+				},
+			)
+			ansible.run()
+		except Exception:
+			log_error("User SSH Certificate Setup Exception", doc=self)
+
+	@frappe.whitelist()
+	def set_memory_limits(self, limits: list):
+		already_seen_processes = set()
+		for limit in limits:
+			if limit["process"] in already_seen_processes:
+				frappe.throw(f"Duplicate process {limit['process']} found in memory limits")
+
+			if int(limit["memory_high"]) > int(limit["memory_max"]):
+				frappe.throw(f"MemoryHigh cannot be more than MemoryMax for process {limit['process']}")
+
+			for key in list(limit.keys()):
+				if key not in ("process", "memory_high", "memory_max"):
+					del limit[key]
+
+			already_seen_processes.add(limit["process"])
+
+		self.mem_limits = json.dumps(limits, indent=1)
+		self.save()
+
+		frappe.enqueue_doc(
+			self.doctype,
+			self.name,
+			"_set_memory_limits",
+			enqueue_after_commit=True,
+		)
+
+		return "Queued memory limit update"
+
+	def _set_memory_limits(self):
+		Ansible(
+			playbook="set_proxy_memory_limits.yml",
+			server=self,
+			user=self._ssh_user(),
+			port=self._ssh_port(),
+			variables={
+				"memory_limits": json.loads(self.mem_limits),
+			},
+		).run()
 
 
 def process_update_nginx_job_update(job):

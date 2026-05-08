@@ -3,32 +3,27 @@
 		:id="slugifiedTitle"
 		class="group"
 		:class="[
-			'rounded-md border duration-700 ring-blue-500',
+			'rounded-md border duration-700 ring-blue-500 flex flex-col',
 			shouldHighlight && 'ring-1',
 		]"
 	>
-		<div class="flex h-12 items-center justify-between border-b px-5 gap-2">
-			<div class="flex items-center">
-				<h3 class="text-lg font-medium text-gray-900">{{ title }}</h3>
-				<div class="pl-2">
-					<Tooltip text="Share Link to this Card">
-						<CopyIcon
-							class="h-4 text-gray-600 outline-none duration-200 hover:text-current cursor-pointer"
-							@click="shareCard"
-						/>
-					</Tooltip>
-				</div>
-			</div>
-
+		<div class="flex items-center border-b p-3 gap-2">
+			<h3 class="text-base font-medium text-gray-900">{{ title }}</h3>
 			<slot name="action"></slot>
+
+			<button @click="shareCard" class="flex items-center gap-1.5 ml-auto" aria-label="Copy">
+				<LucideLink
+					class="size-3 outline-none duration-200 hover:text-current cursor-pointer"
+				/>
+			</button>
 		</div>
+
 		<slot></slot>
 	</div>
 </template>
 
 <script>
 import { Tooltip } from 'frappe-ui';
-import { icon } from '../../utils/components';
 
 export default {
 	name: 'AnalyticsCard',
@@ -36,7 +31,6 @@ export default {
 	emits: ['share-card'],
 	components: {
 		Tooltip,
-		CopyIcon: icon('link'),
 	},
 
 	data() {

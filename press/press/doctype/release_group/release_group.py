@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 	from datetime import datetime
 	from typing import Any
 
+	from press.press.doctype.team.team import Team
 	from press.press.doctype.user_ssh_key.user_ssh_key import UserSSHKey
 
 DEFAULT_DEPENDENCIES = [
@@ -62,11 +63,21 @@ DEFAULT_DEPENDENCIES = [
 
 SUPPORTED_WKHTMLTOPDF_VERSIONS = ["0.12.5", "0.12.6"]
 
+MAX_REGION_LIMIT = 4
+
 
 class LastDeployInfo(TypedDict):
 	name: str
 	status: str
 	creation: datetime
+
+
+class MandatoryAppUpgradeInfo(TypedDict):
+	source: str
+	release: str
+
+
+MandatoryAppUpgrade = dict[str, MandatoryAppUpgradeInfo]
 
 
 if TYPE_CHECKING:
@@ -203,6 +214,15 @@ class ReleaseGroup(Document, TagHelpers):
 		if doc.enable_inplace_updates:
 			doc.inplace_update_failed_benches = self.get_inplace_update_failed_benches()
 
+		doc.linked_version_upgrade = frappe.db.exists(
+			"Version Upgrade",
+			{
+				"destination_group": self.name,
+				"deploy_private_bench": 1,
+				"status": ("in", ["Pending", "Scheduled", "Running"]),
+			},
+		)
+
 	def get_inplace_update_failed_benches(self):
 		return frappe.db.get_all(
 			"Bench",
@@ -213,20 +233,20 @@ class ReleaseGroup(Document, TagHelpers):
 	def get_actions(self):
 		return [
 			{
-				"action": "Rename Bench Group",
-				"description": "Rename the bench group",
+				"action": "Rename Bench",
+				"description": "Rename the bench",
 				"button_label": "Rename",
 				"doc_method": "rename",
 			},
 			{
-				"action": "Transfer Bench Group",
-				"description": "Transfer ownership of this bench group to another team",
+				"action": "Transfer Bench",
+				"description": "Transfer ownership of this bench to another team",
 				"button_label": "Transfer",
 				"doc_method": "send_change_team_request",
 			},
 			{
-				"action": "Drop Bench Group",
-				"description": "Drop the bench group",
+				"action": "Drop Bench",
+				"description": "Drop the bench",
 				"button_label": "Drop",
 				"doc_method": "drop",
 				"group": "Dangerous Actions",
@@ -470,7 +490,7 @@ class ReleaseGroup(Document, TagHelpers):
 			limit=1,
 		):
 			frappe.throw(
-				f"Bench Group of name {self.title} already exists. Please try another name.",
+				f"Bench of name {self.title} already exists. Please try another name.",
 				frappe.ValidationError,
 			)
 
@@ -501,7 +521,7 @@ class ReleaseGroup(Document, TagHelpers):
 		source = frappe.get_doc("App Source", app.source)
 		if all(row.version != self.version for row in source.versions):
 			branch, repo = frappe.db.get_values("App Source", app.source, ("branch", "repository"))[0]
-			msg = f"{repo.rsplit('/')[-1] or repo.rsplit('/')[-2]}:{branch} branch is no longer compatible with {self.version} version of Frappe"
+			msg = f"{repo.rsplit('/')[-1] or repo.rsplit('/')[-2]}:{branch} branch is no longer compatible with bench of {self.version}"
 			frappe.throw(msg, frappe.ValidationError)
 
 	def validate_servers(self):
@@ -622,7 +642,8 @@ class ReleaseGroup(Document, TagHelpers):
 	@dashboard_whitelist()
 	def initial_deploy(self):
 		dc = self.create_deploy_candidate()
-		dc.schedule_build_and_deploy()
+		response = dc.schedule_build_and_deploy()
+		return response.get("name")
 
 	def _try_server_size_increase_or_throw(self, server: Server, mountpoint: str, required_size: int):
 		"""In case of low storage on the server try to either increase the storage (if allowed) or throw an error"""
@@ -716,12 +737,15 @@ class ReleaseGroup(Document, TagHelpers):
 		self,
 		apps_to_update=None,
 		run_will_fail_check=False,
+		validate_pre_candidate_checks: bool = True,
+		ignore_permissions: bool = False,
 	) -> "DeployCandidate | None":
 		if not self.enabled:
 			return None
 
-		self.check_app_server_storage()
-		self.check_auto_scales()
+		if validate_pre_candidate_checks:
+			self.check_app_server_storage()
+			self.check_auto_scales()
 
 		apps = self.get_apps_to_update(apps_to_update)
 		if apps_to_update is None:
@@ -763,7 +787,7 @@ class ReleaseGroup(Document, TagHelpers):
 
 			check_if_update_will_fail(self, new_dc)
 
-		new_dc.insert()
+		new_dc.insert(ignore_permissions=ignore_permissions)
 		return new_dc
 
 	def validate_dc_apps_against_rg(self, dc_apps) -> None:
@@ -852,6 +876,16 @@ class ReleaseGroup(Document, TagHelpers):
 
 		return sorted_apps
 
+	@property
+	def has_running_release_pipeline(self) -> bool:
+		return bool(
+			frappe.db.exists(
+				"Release Pipeline",
+				{"release_group": self.name, "status": ("in", ["Pending", "Running", "Retrying"])},
+				"name",
+			)
+		)
+
 	@frappe.whitelist()
 	def deploy_information(self):
 		out = frappe._dict(update_available=False)
@@ -862,6 +896,14 @@ class ReleaseGroup(Document, TagHelpers):
 
 		out.last_deploy = self.last_dc_info
 		out.deploy_in_progress = self.deploy_in_progress
+		out.has_running_release_pipeline = self.has_running_release_pipeline
+		if not out.deploy_in_progress and out.has_running_release_pipeline:
+			# Check if the deploy has finished and bench creation is underway.
+			out.bench_creation_underway = bool(
+				frappe.db.exists("Bench", {"group": self.name, "status": ("in", ("Installing", "Pending"))})
+			)
+		else:
+			out.bench_creation_underway = False
 
 		out.removed_apps = self.get_removed_apps()
 		out.update_available = (
@@ -869,6 +911,8 @@ class ReleaseGroup(Document, TagHelpers):
 			or (len(out.removed_apps) > 0)
 			or self.dependency_update_pending
 		)
+		out.update_available = False if out.has_running_release_pipeline else out.update_available
+		out.update_available = out.update_available if self.enabled else False
 		out.number_of_apps = len(self.apps)
 
 		out.sites = [
@@ -1000,7 +1044,7 @@ class ReleaseGroup(Document, TagHelpers):
 		old_team = frappe.db.get_value("Team", self.team, "user")
 
 		if old_team == team_mail_id:
-			frappe.throw(f"Bench group is already owned by the team {team_mail_id}")
+			frappe.throw(f"Bench is already owned by the team {team_mail_id}")
 
 		key = frappe.generate_hash("Release Group Transfer Link", 20)
 		frappe.get_doc(
@@ -1121,6 +1165,9 @@ class ReleaseGroup(Document, TagHelpers):
 
 	@property
 	def status(self):
+		if not self.enabled:
+			return "Disabled"
+
 		active_benches = frappe.db.get_all(
 			"Bench", {"group": self.name, "status": "Active"}, limit=1, order_by="creation desc"
 		)
@@ -1188,7 +1235,9 @@ class ReleaseGroup(Document, TagHelpers):
 
 			next_hash = app.hash
 
-			update_available = not current_hash or current_hash != next_hash or will_branch_change
+			update_available = (
+				not current_hash or current_hash != next_hash or will_branch_change
+			) and next_hash
 			if app.releases:
 				update_available = any(not release.is_yanked for release in app.releases)
 
@@ -1216,9 +1265,41 @@ class ReleaseGroup(Document, TagHelpers):
 			)
 		return apps
 
+	def mandatory_app_upgrades(self) -> MandatoryAppUpgrade:
+		"""Returns a map of { app_name: { source, release, hash } } for enforced upgrades."""
+		app_sources = [app.source for app in self.apps]
+
+		# We query the child table directly to find any mandatory rules
+		# linked to 'Active' policies that match our current app sources.
+		# Adjust table names/fields as per your schema.
+		ReleaseGroupPolicy = frappe.qb.DocType("Release Group Policy")
+		ReleaseGroupPolicyApp = frappe.qb.DocType("Release Group Policy App")
+
+		policies = (
+			frappe.qb.from_(ReleaseGroupPolicy)
+			.join(ReleaseGroupPolicyApp)
+			.on(ReleaseGroupPolicyApp.parent == ReleaseGroupPolicy.name)
+			.where(ReleaseGroupPolicy.status == "Active")
+			.where(ReleaseGroupPolicy.scope == "App Source")
+			.where(ReleaseGroupPolicy.target.isin(app_sources))
+			.where(
+				ReleaseGroupPolicyApp.source.notin(app_sources)
+			)  # Only consider policies that target sources different from current ones
+			.select(
+				ReleaseGroupPolicyApp.app,
+				ReleaseGroupPolicyApp.source,
+				ReleaseGroupPolicyApp.release,
+			)
+			.run(as_dict=True)
+		)
+
+		# { 'frappe': {'source': '...', 'release': '...'} }
+		return {p["app"]: {"source": p["source"], "release": p["release"]} for p in policies}
+
 	def get_next_apps(self, current_apps) -> list[frappe._dict[str, str | datetime]]:  # noqa: C901
 		marketplace_app_sources = self.get_marketplace_app_sources()
-		current_team = get_current_team(True)
+		# Only users with access to the team can reach this stage therefore we can trust `self.team`
+		current_team: Team = frappe.get_doc("Team", self.team)
 		app_publishers_team = [current_team.name]
 
 		if current_team.parent_team:
@@ -1259,7 +1340,53 @@ class ReleaseGroup(Document, TagHelpers):
 			.run(as_dict=True)
 		)
 
+		erroneous_marketplace_app_sources = frappe.get_all(
+			"Marketplace App Version",
+			{
+				"parenttype": "Marketplace App",
+				"parent": (
+					"in",
+					frappe.get_all(
+						"Marketplace App",
+						{
+							"name": ("in", [app.app for app in self.apps]),
+							"status": "Attention Required",
+						},
+						pluck="name",
+					),
+				),
+			},
+			pluck="source",
+		)
+
+		mandatory_upgrades = self.mandatory_app_upgrades()
+
 		for app in self.apps:
+			if app.app in mandatory_upgrades:
+				rule = mandatory_upgrades[app.app]
+				release = frappe.db.get_value(
+					"App Release",
+					rule["release"],
+					["name", "source", "public", "status", "hash", "message", "creation"],
+					as_dict=True,
+				)
+				release["is_yanked"] = False  # Mandatory releases cannot be yanked
+				release["is_mandatory"] = True  # For UI
+				next_apps.append(
+					frappe._dict(
+						{
+							"app": app.app,
+							"source": rule["source"],
+							"release": rule["release"],
+							"hash": release["hash"],
+							"title": app.title,
+							"releases": [release],  # ONLY the mandatory release is shown
+							"is_mandatory": True,
+						}
+					)
+				)
+				continue
+
 			latest_app_release = None
 			latest_app_releases = find_all(latest_releases, lambda x: x.source == app.source)
 
@@ -1274,8 +1401,11 @@ class ReleaseGroup(Document, TagHelpers):
 				{"hash": ("in", [release.hash for release in latest_app_releases])},
 				pluck="hash",
 			)
-			if len(yanked_releases) == len(latest_app_releases):
-				# If all releases are yanked, we don't want to show them
+			if (
+				len(yanked_releases) == len(latest_app_releases)
+				or app.source in erroneous_marketplace_app_sources
+			):
+				# If all releases are yanked, we don't want to show them, or if they are of an erroneous marketplace app
 				latest_app_releases = []
 
 			# No release exists for this source
@@ -1308,7 +1438,7 @@ class ReleaseGroup(Document, TagHelpers):
 						"app": app.app,
 						"source": app.source,
 						"release": upcoming_release,
-						"hash": upcoming_hash,
+						"hash": upcoming_hash if upcoming_releases else None,
 						"title": app.title,
 						"releases": upcoming_releases[:16],
 					}
@@ -1386,21 +1516,9 @@ class ReleaseGroup(Document, TagHelpers):
 			fields=["name", "team", "public"],
 		)
 
-		if required_app_source:
-			required_app_source = required_app_source[0]
-			if not required_app_source.public:
-				required_app_source = frappe.get_doc("App Source", required_app_source.name)
-				# check if the version already exists
-				if not any(vs.version == self.version for vs in required_app_source.versions):
-					required_app_source.append(
-						"versions",
-						{
-							"version": self.version,
-						},
-					)
-					required_app_source.save()
+		required_app_source = required_app_source[0] if required_app_source else None
 
-		else:
+		if not required_app_source:
 			versions = frappe.get_all(
 				"App Source Version", filters={"parent": current_app_source.name}, pluck="version"
 			)
@@ -1456,8 +1574,8 @@ class ReleaseGroup(Document, TagHelpers):
 		Add new region to release group (limits to 2). Meant for dashboard use only.
 		"""
 
-		if len(self.get_clusters()) >= 2:
-			frappe.throw("More than 2 regions for bench not allowed")
+		if len(self.get_clusters()) >= MAX_REGION_LIMIT:
+			frappe.throw(f"More than {MAX_REGION_LIMIT} for bench not allowed")
 		self.add_cluster(region)
 
 	def add_cluster(self, cluster: str):
@@ -1482,22 +1600,26 @@ class ReleaseGroup(Document, TagHelpers):
 		except frappe.DoesNotExistError:
 			return None
 
-	def get_last_deploy_candidate_build(self) -> DeployCandidateBuild:
+	def get_last_deploy_candidate_build(self) -> DeployCandidateBuild | None:
 		try:
 			return frappe.get_last_doc("Deploy Candidate Build", {"group": self.name})
 		except frappe.DoesNotExistError:
 			return None
 
 	@frappe.whitelist()
-	def add_server(self, server: str, deploy=False, force_new_build: bool = False):
+	def add_server(self, server: str, deploy=False, force_new_build: bool = False) -> str | None:
 		"""
 		Add a server to the release group in case last successful deploy candidate exists
 		create a deploy check if the image has not been pruned from the registry in case of
 		missing image create new build.
 		"""
-		if not deploy:
-			return None
+		self.append("servers", {"server": server, "default": False})
+		self.save()
+		if deploy:
+			return self.deploy_on_server(server, force_new_build=force_new_build)
+		return None
 
+	def deploy_on_server(self, server: str, force_new_build=False) -> str | None:
 		server_platform = frappe.get_value("Server", server, "platform")
 		last_successful_deploy_candidate_build = self.get_last_successful_candidate_build(
 			platform=server_platform
@@ -1512,25 +1634,36 @@ class ReleaseGroup(Document, TagHelpers):
 			if not last_candidate_build:
 				frappe.throw("No build present for this release group", frappe.ValidationError)
 
-			self.append("servers", {"server": server, "default": False})
-			self.save()
-
 			return create_platform_build_and_deploy(
 				deploy_candidate=last_candidate_build.candidate.name,  # type: ignore
 				server=server,
 				platform=server_platform,
 			)
 
-		self.append("servers", {"server": server, "default": False})
-		self.save()
-
 		try:
 			return last_successful_deploy_candidate_build._create_deploy(
 				[server],
 				check_image_exists=True,
-			)
+			).name
 		except ImageNotFoundInRegistry:
-			return self.add_server(server=server, deploy=True, force_new_build=True)
+			return self.deploy_on_server(server=server, force_new_build=True)
+
+	@frappe.whitelist()
+	def redeploy_on_missing_servers(self):
+		"""
+		Redeploy the latest successful candidate on servers in this release group
+		that do not currently have a Bench in an active, installing, or pending state.
+		"""
+		deployed_servers = frappe.db.get_all(
+			"Bench",
+			filters={"group": self.name, "status": ("in", ("Active", "Installing", "Pending"))},
+			pluck="server",
+		)
+
+		for server in self.servers:
+			if server.server in deployed_servers:
+				continue
+			self.deploy_on_server(server.server)
 
 	@frappe.whitelist()
 	def change_server(self, server: str):
@@ -1581,6 +1714,7 @@ class ReleaseGroup(Document, TagHelpers):
 				branch=app["branch"],
 				version=self.version,
 				github_installation_id=app.get("github_installation_id", None),
+				ease_versioning_constrains=True,  # Allow 15.75.0 in a version 15 release group, for example
 			)
 
 		source = app_doc.add_source(
@@ -1610,6 +1744,18 @@ class ReleaseGroup(Document, TagHelpers):
 
 	@frappe.whitelist()
 	def archive(self):
+		# Cancel any pending/scheduled version upgrades linked to this bench
+		version_upgrades = frappe.db.get_all(
+			"Version Upgrade",
+			filters={
+				"destination_group": self.name,
+				"status": ("in", ["Pending", "Scheduled"]),
+			},
+			pluck="name",
+		)
+		for upgrade_name in version_upgrades:
+			frappe.db.set_value("Version Upgrade", upgrade_name, "status", "Cancelled")
+
 		benches = frappe.get_all("Bench", filters={"group": self.name, "status": "Active"}, pluck="name")
 		for bench in benches:
 			frappe.get_doc("Bench", bench).archive()
@@ -1622,7 +1768,6 @@ class ReleaseGroup(Document, TagHelpers):
 	@dashboard_whitelist()
 	def delete(self) -> None:
 		# Note: using delete instead of archive to avoid client api fetching the doc again
-
 		self.archive()
 
 	def set_default_app_cache_flags(self):
@@ -1651,22 +1796,68 @@ class ReleaseGroup(Document, TagHelpers):
 		return frappe.get_cached_value("Frappe Version", self.version, "number") >= version
 
 	def setup_default_feature_flags(self):
-		DEFAULT_FEATURE_FLAGS = {
-			"Version 14": {"merge_default_and_short_rq_queues": True},
-			"Version 15": {
-				"gunicorn_threads_per_worker": "4",
-				"merge_default_and_short_rq_queues": True,
-				"use_rq_workerpool": True,
-			},
-			"Nightly": {
-				"gunicorn_threads_per_worker": "4",
-				"merge_default_and_short_rq_queues": True,
-				"use_rq_workerpool": True,
-			},
+		basic_config = {
+			"merge_default_and_short_rq_queues": True,
 		}
-		flags = DEFAULT_FEATURE_FLAGS.get(self.version, {})
+
+		higher_version_config = {
+			"gunicorn_threads_per_worker": "4",
+			"use_rq_workerpool": True,
+		}
+
+		if self.version == "Version 14":
+			flags = basic_config
+
+		elif self.is_this_version_or_above(15):
+			flags = {**basic_config, **higher_version_config}
+
+		else:
+			flags = {}
+
 		for key, value in flags.items():
 			setattr(self, key, value)
+
+	@dashboard_whitelist()
+	def clone_group(self, title: str | None):
+		if not title:
+			title = self.title + " - Cloned - " + frappe.generate_hash(length=5)
+
+		new_group: ReleaseGroup = frappe.new_doc("Release Group")
+		new_group.update(
+			{
+				"title": title,
+				"team": self.team,
+				"public": 0,
+				"enabled": 1,
+				"version": self.version,
+				"dependencies": self.dependencies,
+				"is_redisearch_enabled": self.is_redisearch_enabled,
+			}
+		)
+
+		for s in self.servers:
+			new_group.append(
+				"servers",
+				{"server": s.server, "default": s.default},
+			)
+
+		for s in self.apps:
+			new_group.append(
+				"apps",
+				{
+					"app": s.app,
+					"source": s.source,
+					"title": s.title,
+					"enable_auto_deploy": s.enable_auto_deploy,
+				},
+			)
+
+		new_group.insert(ignore_permissions=True)
+		new_group.initial_deploy()  # Deploy also
+		frappe.msgprint(
+			f"New release group <a href='{new_group.get_url()}' target='_blank'>{new_group.title}</a> created and deployed successfully!"
+		)
+		return new_group
 
 
 @redis_cache(ttl=60)
@@ -1868,7 +2059,12 @@ def add_public_servers_to_public_groups():
 	)
 	public_servers = frappe.get_all(
 		"Server",
-		filters={"public": 1, "status": "Active"},
+		filters={
+			"public": 1,
+			"status": "Active",
+			"provider": ["not in", ("Hetzner", "Frappe Compute")],
+			"cluster": ["!=", "Dar Es Salaam"],
+		},
 		pluck="name",
 	)
 

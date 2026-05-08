@@ -6,7 +6,9 @@
 					v-if="!isSignupFlow && !$isMobile && !isHideSidebar"
 					class="relative block min-h-0 flex-shrink-0 overflow-hidden hover:overflow-auto"
 				>
-					<AppSidebar v-if="$session.user" />
+					<AppSidebar
+						v-if="$session.user && $team?.doc && route.name !== 'Login'"
+					/>
 				</div>
 				<div class="w-full overflow-auto z-0" id="scrollContainer">
 					<MobileNav
@@ -29,21 +31,35 @@
 				</div>
 			</div>
 		</div>
-		<Toaster position="top-right" />
+		<Toaster
+			position="top-right"
+			:toastOptions="{ class: 'text-sm prose-sm' }"
+		/>
 		<component v-for="dialog in dialogs" :is="dialog" :key="dialog.id" />
+		<SearchModal v-if="searchModalOpen" />
 	</div>
 </template>
 
 <script setup>
-import { defineAsyncComponent, computed, watch, ref, provide } from 'vue';
+import {
+	defineAsyncComponent,
+	computed,
+	watch,
+	ref,
+	provide,
+	onMounted,
+} from 'vue';
 import { Toaster } from 'vue-sonner';
 import { dialogs } from './utils/components';
 import { useRoute } from 'vue-router';
 import { getTeam } from './data/team';
 import { session } from './data/session.js';
+import { searchModalOpen } from '@/data/ui';
+import SearchModal from '@/components/navigation/search/Popup.vue';
+import { useSearch } from '@/components/navigation/search/utils';
 
 const AppSidebar = defineAsyncComponent(
-	() => import('./components/AppSidebar.vue'),
+	() => import('./components/navigation/sidebar/Sidebar.vue'),
 );
 const MobileNav = defineAsyncComponent(
 	() => import('./components/MobileNav.vue'),
@@ -93,6 +109,14 @@ watch(
 
 provide('team', team);
 provide('session', session);
+
+watch(
+  () => team?.doc?.onboarding?.complete,
+  (x) => {
+    if(x) useSearch();
+  },
+  { once: true }
+);
 </script>
 
 <style src="./assets/style.css"></style>

@@ -217,7 +217,12 @@ def new_unified(server: UnifiedServerDetails):
 
 	proxy_server = frappe.get_all(
 		"Proxy Server",
-		{"status": "Active", "cluster": cluster.name, "is_primary": True},
+		{
+			"status": "Active",
+			"cluster": cluster.name,
+			"is_primary": True,
+			"exclude_from_auto_selection": False,
+		},
 		limit=1,
 	)[0]
 
@@ -259,7 +264,12 @@ def new(server):
 
 	proxy_server = frappe.get_all(
 		"Proxy Server",
-		{"status": "Active", "cluster": cluster.name, "is_primary": True},
+		{
+			"status": "Active",
+			"cluster": cluster.name,
+			"is_primary": True,
+			"exclude_from_auto_selection": False,
+		},
 		limit=1,
 	)[0]
 
@@ -590,8 +600,8 @@ def prometheus_query(
 	except (requests.exceptions.RequestException, ValueError):
 		frappe.throw("Unable to connect to monitor server", MonitorServerDown)
 
-	datasets = []
-	labels = []
+	datasets: list[dict] = []
+	labels: list[float] = []
 
 	if data.get("status") != "success":
 		return {"datasets": datasets, "labels": labels}
@@ -613,12 +623,12 @@ def prometheus_query(
 			dataset["values"][labels.index(label)] = flt(value, 2)
 		datasets.append(dataset)
 
-	labels = [
+	converted_labels: list[datetime] = [
 		convert_utc_to_timezone(datetime.fromtimestamp(label, tz=tz.utc).replace(tzinfo=None), timezone)
 		for label in labels
 	]
 
-	return {"datasets": datasets, "labels": labels}
+	return {"datasets": datasets, "labels": converted_labels}
 
 
 @frappe.whitelist()
@@ -627,17 +637,8 @@ def options():
 		frappe.throw("Servers feature is not yet enabled on your account")
 
 	regions_filter = {"cloud_provider": ("!=", "Generic"), "public": True, "status": "Active"}
-	is_system_user = (
-		(frappe.session and frappe.session.data and frappe.session.data.user_type)
-		or (
-			frappe.session
-			and frappe.session.user
-			and frappe.get_cached_value("User", frappe.session.user, "user_type")
-		)
-	) == "System User"
 
-	if is_system_user:
-		regions_filter.pop("public", None)
+	# Temporarily here to skip the Frappe Compute cloud provider
 
 	regions = frappe.get_all(
 		"Cluster",
@@ -658,12 +659,6 @@ def options():
 			"by_default_select_unified_mode",
 		],
 	)
-
-	if not is_system_user and not (
-		frappe.local and frappe.local.team() and frappe.local.team().hetzner_internal_user
-	):
-		# filter out hetzner clusters
-		regions = [region for region in regions if region.get("cloud_provider") != "Hetzner"]
 
 	cloud_providers = get_cloud_providers()
 	"""
@@ -832,6 +827,7 @@ def plans(name, cluster=None, platform=None, resource_name=None, cpu_and_memory_
 		fields=[
 			"name",
 			"title",
+			"description",
 			"price_usd",
 			"price_inr",
 			"vcpu",
@@ -853,19 +849,7 @@ def plans(name, cluster=None, platform=None, resource_name=None, cpu_and_memory_
 		if not plan.get("plan_type"):
 			plan["plan_type"] = default_server_plan_type
 
-		if (
-			(frappe.session and frappe.session.data and frappe.session.data.user_type)
-			or (
-				frappe.session
-				and frappe.session.user
-				and frappe.get_cached_value("User", frappe.session.user, "user_type")
-			)
-		) == "System User":
-			plan["allow_unified_server"] = plan.get("allow_unified_server", False)
-		else:
-			plan["allow_unified_server"] = frappe.local.team().allow_unified_servers and plan.get(
-				"allow_unified_server", False
-			)
+		plan["allow_unified_server"] = plan.get("allow_unified_server", False)
 
 	server_plan_types = get_server_plan_types()
 
@@ -882,8 +866,21 @@ def plans(name, cluster=None, platform=None, resource_name=None, cpu_and_memory_
 
 @frappe.whitelist()
 def play(play):
-	play = frappe.get_doc("Ansible Play", play)
-	play = play.as_dict()
+	play_doc = frappe.get_doc("Ansible Play", play)
+	play_team = None
+
+	if play_doc.server:
+		server_type = play_doc.server_type
+		if server_type == "Server":
+			play_team = frappe.db.get_value("Server", play_doc.server, "team")
+		elif server_type == "Database Server":
+			play_team = frappe.db.get_value("Database Server", play_doc.server, "team")
+
+	current_team = get_current_team()
+	if play_team and play_team != current_team:
+		frappe.throw("Not permitted to access this play", frappe.PermissionError)
+
+	play = play_doc.as_dict()
 	whitelisted_fields = [
 		"name",
 		"play",
