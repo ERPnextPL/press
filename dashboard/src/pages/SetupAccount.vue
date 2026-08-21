@@ -83,7 +83,7 @@
 							/>
 							<PhoneInput
 								v-if="!isInvitation"
-								label="Phone Number(Optional)"
+								label="Phone"
 								v-model="phoneNumber"
 								:countries="countries"
 								:country="country"
@@ -94,7 +94,7 @@
 							class="mt-4"
 							:message="$resources.setupAccount.error"
 						/>
-						<div v-if="showLeadsConsentCheckbox" class="mt-4 text-gray-600">
+						<div v-if="showLeadsConsentCheckbox" class="mt-4 text-ink-gray-6">
 							<input
 								id="share-details-consent"
 								type="checkbox"
@@ -108,6 +108,10 @@
 								>Allow my details to be shared with a local partner</label
 							>
 						</div>
+						<ErrorMessage
+							class="mt-4"
+							:message="$resources.acceptInvite.error"
+						/>
 						<Button
 							class="mt-4"
 							variant="solid"
@@ -124,11 +128,11 @@
 					</template>
 				</form>
 				<div class="mt-4" v-if="!is2FA && !isInvitation">
-					<span class="text-base font-normal text-gray-600">
+					<span class="text-base font-normal text-ink-gray-6">
 						{{ 'By signing up, you agree to our ' }}
 					</span>
 					<a
-						class="text-base font-normal text-gray-900 underline hover:text-gray-700"
+						class="text-base font-normal text-ink-gray-9 underline hover:text-ink-gray-7"
 						href="https://frappecloud.com/policies"
 					>
 						Terms & Policies
@@ -222,6 +226,12 @@ export default {
 						this.oauthDomain = res.oauth_domain;
 						this.countries = res.countries;
 						this.saasProduct = res.product_trial;
+						if (!res.is_invitation) {
+							this.$pulse?.capture('signup_verified', {
+								method: res.oauth_signup ? 'oauth' : 'email',
+								product: res.product_trial?.name,
+							});
+						}
 					}
 				},
 			};

@@ -17,6 +17,7 @@ from rq.timeouts import JobTimeoutException
 from press.api.client import dashboard_whitelist
 from press.overrides import get_permission_query_conditions_for_doctype
 from press.press.doctype.deploy_candidate_build.deploy_candidate_build import create_platform_build_and_deploy
+from press.press.doctype.site_migration.site_migration import get_ongoing_migration
 from press.utils.jobs import has_job_timeout_exceeded
 
 if TYPE_CHECKING:
@@ -380,7 +381,9 @@ class SiteAction(Document):
 		target_cluster = self.get_argument("cluster")
 		current_cluster = frappe.db.get_value("Server", self.site_doc.server, "cluster")
 		if target_cluster == current_cluster:
-			frappe.throw("Target cluster must be different from current cluster.")
+			frappe.throw(
+				"The site is already in the selected region. Please choose a different region to move it to."
+			)
 
 		# create the `Site Migration`
 		current_group = frappe.db.get_value("Site", self.site, "group")
@@ -506,7 +509,7 @@ class SiteAction(Document):
 			)
 
 	def before_insert(self):
-		# Check if no other site action is running for the same site
+		# Check if no other site action/migration is running for the same site
 		if frappe.db.exists(
 			"Site Action",
 			{
@@ -516,6 +519,11 @@ class SiteAction(Document):
 		):
 			frappe.throw(
 				"Another site action is already scheduled / running for this site. Please wait for it to complete before starting a new one."
+			)
+
+		if get_ongoing_migration(self.site, scheduled=True):
+			frappe.throw(
+				f"Ongoing/Scheduled Site Migration for the site {frappe.bold(self.site)} exists, retry once it is completed"
 			)
 
 		# If any key is blank string or None, remove it from arguments
@@ -534,7 +542,9 @@ class SiteAction(Document):
 
 	def validate(self):
 		if self.action_type == "Move From Private To Shared Bench":
-			frappe.throw("Move From Private To Shared Bench action is not available currently.")
+			frappe.throw(
+				"Moving a site from a private bench to a shared bench isn't available right now. Please contact support if you need to do this."
+			)
 
 	def on_update(self):
 		save_doc = False
@@ -620,7 +630,9 @@ class SiteAction(Document):
 	@dashboard_whitelist()
 	def cancel_action(self):
 		if self.status != "Scheduled":
-			frappe.throw("Only Scheduled actions can be cancelled.")
+			frappe.throw(
+				"Only scheduled actions can be cancelled. This action has already started or finished, so it can no longer be cancelled."
+			)
 			return
 
 		self.status = "Cancelled"
@@ -815,8 +827,11 @@ class SiteAction(Document):
 		rg_apps.discard("frappe")
 		site_apps.discard("frappe")
 		if diff := site_apps - rg_apps:
+			apps = ", ".join(frappe.bold(app) for app in diff)
+			install = "<a class='underline' href='https://docs.frappe.io/cloud/installing-an-app#bench-group'>install</a>"
+			remove = "<a class='underline' href='https://docs.frappe.io/cloud/how-to-uninstall-an-app-from-the-site'>remove</a>"
 			frappe.throw(
-				f"Site has following apps {', '.join(diff)} which are not present in the destination release group. Please install those apps in the destination release group or remove them from the site before moving.",
+				f"Site has following apps: {apps} which are not present in the destination release group. Please {install} those apps in the destination release group or {remove} them from the site before moving.",
 				frappe.ValidationError,
 			)
 

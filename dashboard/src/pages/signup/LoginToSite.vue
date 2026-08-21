@@ -2,12 +2,9 @@
 	<div class="flex h-screen overflow-hidden">
 		<div class="w-full overflow-auto">
 			<LoginBox
-				v-if="$resources?.siteRequest?.doc?.status === 'Error'"
+				v-if="siteRequestDoc?.status === 'Error'"
 				title="Site creation failed"
-				:subtitle="
-					$resources?.siteRequest?.doc?.domain ||
-					$resources?.siteRequest?.doc?.site
-				"
+				:subtitle="siteRequestDoc?.domain || siteRequestDoc?.site"
 			>
 				<template v-slot:logo v-if="saasProduct">
 					<div class="flex space-x-2">
@@ -19,7 +16,7 @@
 				</template>
 				<template v-slot:default>
 					<div class="flex h-40 flex-col justify-center">
-						<div class="text-base leading-5 text-gray-800">
+						<div class="text-base leading-5 text-ink-gray-8">
 							<p>It looks like something went wrong!</p>
 							<p class="">
 								Contact
@@ -35,10 +32,7 @@
 			<LoginBox
 				v-else
 				title="Let's set up your site"
-				:subtitle="
-					this.$resources?.siteRequest?.doc?.domain ||
-					this.$resources?.siteRequest?.doc?.site
-				"
+				:subtitle="siteRequestDoc?.domain || siteRequestDoc?.site"
 			>
 				<template v-slot:logo v-if="saasProduct">
 					<div class="flex space-x-2">
@@ -49,14 +43,14 @@
 					</div>
 				</template>
 				<template v-slot:default>
-					<div class="flex mt-12 flex-col items-center justify-center">
+					<div class="mt-12 flex flex-col items-center justify-center">
 						<Progress
 							size="lg"
 							:value="progressCount"
 							:label="currentBuildStep"
 						/>
 						<div
-							class="flex w-full items-center space-x-2 pt-4 text-sm text-gray-600"
+							class="flex w-full items-center space-x-2 pt-4 text-sm text-ink-gray-6"
 						>
 							<lucide-info class="h-4 w-4" />
 							<span>{{ currentHelpText }}</span>
@@ -103,13 +97,11 @@ export default {
 				auto: true,
 				onSuccess(doc) {
 					if (doc.status === 'Site Created') {
+						this.showCompleteProgress();
 						setTimeout(() => {
 							this.loginToSite();
-						}, 2000);
-					} else if (
-						doc.status === 'Wait for Site' ||
-						doc.status === 'Prefilling Setup Wizard'
-					) {
+						}, 500);
+					} else if (this.isSiteProvisioning(doc.status)) {
 						this.$resources.siteRequest.getProgress.reload();
 					}
 				},
@@ -118,15 +110,15 @@ export default {
 						method: 'get_progress',
 						makeParams() {
 							return {
-								current_progress:
-									this.$resources.siteRequest.getProgress.data?.progress || 0,
+								current_progress: this.progressCount,
 							};
 						},
 						onSuccess: (data) => {
 							if (data.current_step === 'Site Created') {
+								this.showCompleteProgress();
 								setTimeout(() => {
 									this.loginToSite();
-								}, 2000);
+								}, 500);
 								return;
 							}
 
@@ -142,7 +134,7 @@ export default {
 								currentStepMap[data.current_step] ||
 								data.current_step ||
 								this.currentBuildStep;
-							this.progressCount += 1;
+							const nextProgress = Number(data.progress || 0);
 
 							if (
 								!(
@@ -150,7 +142,11 @@ export default {
 									this.progressCount <= 10
 								)
 							) {
-								this.progressCount = Math.round(data.progress * 10) / 10;
+								const visibleProgress = Math.min(
+									Math.max(nextProgress, this.progressCount + 0.2),
+									95,
+								);
+								this.progressCount = Math.round(visibleProgress * 10) / 10;
 								setTimeout(() => {
 									if (
 										['Site Created', 'Error'].includes(
@@ -178,6 +174,9 @@ export default {
 		saasProduct() {
 			return this.$resources.saasProduct.doc;
 		},
+		siteRequestDoc() {
+			return this.$resources?.siteRequest?.doc;
+		},
 		currentHelpText() {
 			const defaultHelpTexts = [
 				'Find anything with the Awesome bar!',
@@ -197,7 +196,20 @@ export default {
 		},
 	},
 	methods: {
+		showCompleteProgress() {
+			this.progressCount = 100;
+			this.currentBuildStep = 'Almost there';
+		},
+		isSiteProvisioning(status) {
+			return ['Wait for Site', 'Prefilling Setup Wizard', 'Adding Domain'].includes(
+				status,
+			);
+		},
 		loginToSite() {
+			this.$pulse?.capture('trial_redirected_to_site', {
+				product: this.productId,
+				site: this.siteRequestDoc?.site,
+			});
 			this.$resources.siteRequest.getLoginSid.submit();
 		},
 	},

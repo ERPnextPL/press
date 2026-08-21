@@ -165,8 +165,26 @@ class RemoteFile(Document):
 		file_type: DF.Data | None
 		site: DF.Link | None
 		status: DF.Literal["Available", "Unavailable"]
+		team: DF.Link | None
 		url: DF.Code | None
 	# end: auto-generated types
+
+	def before_validate(self):
+		self.ensure_team_set()
+
+	def ensure_team_set(self):
+		if self.team:
+			return
+
+		if self.site:
+			# Backup remote files are created in agent job callbacks, where the
+			# session user is Administrator. The site's team is the owner there.
+			self.team = frappe.db.get_value("Site", self.site, "team")
+
+		if not self.team:
+			from press.utils import get_current_team
+
+			self.team = get_current_team()
 
 	@property
 	def s3_client(self):
@@ -308,6 +326,9 @@ def delete_s3_files(buckets):
 		endpoint_url = bucket_config.get("endpoint_url")
 		if not endpoint_url and region:
 			endpoint_url = f"https://s3.{region}.amazonaws.com"
+		if endpoint_url and "s3.me-south-1.amazonaws.com" in endpoint_url:
+			continue
+
 		s3 = resource(
 			"s3",
 			aws_access_key_id=press_settings.offsite_backups_access_key_id,
