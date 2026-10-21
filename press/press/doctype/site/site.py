@@ -5020,6 +5020,15 @@ def process_restore_job_update(job, force=False):
 			frappe.db.set_value("Site", job.site, "creation_failed", frappe.utils.now())
 		frappe.db.set_value("Site", job.site, "status", updated_status)
 		create_site_status_update_webhook_event(job.site)
+		if job.status == "Success":
+			refresh_usage_after_restore(job.site)
+
+
+def refresh_usage_after_restore(site_name: str):
+	"""Restored files change the disk usage at once, the scheduled sync takes hours to notice."""
+	with suppress(Exception):
+		# Don't fail the job update when the usage can't be fetched
+		Site("Site", site_name).sync_info()
 
 
 def process_reinstall_site_job_update(job):

@@ -2461,7 +2461,7 @@ def multipart_exit(file, id, action, parts=None):
 			"remote_secret_access_key",
 			raise_exception=False,
 		),
-		region_name="ap-south-1",
+		region_name=frappe.db.get_single_value("Press Settings", "backup_region"),
 	)
 	if action == "abort":
 		response = s3_client.abort_multipart_upload(Bucket=bucket_name, Key=file, UploadId=id)
