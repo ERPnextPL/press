@@ -2399,7 +2399,7 @@ def get_trial_plan():
 
 
 @frappe.whitelist()
-def get_upload_link(file, parts=1):
+def get_upload_link(file, parts=1, max_size=None):
 	upload_bucket_details = frappe.db.get_values(
 		"Press Settings",
 		"Press Settings",
@@ -2443,14 +2443,17 @@ def get_upload_link(file, parts=1):
 			payload["signed_urls"] = signed_urls
 			return payload
 
-		return s3_client.generate_presigned_post(bucket_name, object_name, ExpiresIn=expiration)
+		conditions = [["content-length-range", 1, int(max_size)]] if max_size else None
+		return s3_client.generate_presigned_post(
+			bucket_name, object_name, Conditions=conditions, ExpiresIn=expiration
+		)
 
 	except ClientError as e:
 		log_error("Failed to Generate Presigned URL", content=e)
 
 
 @frappe.whitelist()
-def multipart_exit(file, id, action, parts=None):
+def multipart_exit(file, id, action, parts=None, max_size=None):
 	bucket_name = frappe.db.get_single_value("Press Settings", "remote_uploads_bucket")
 	s3_client = client(
 		"s3",
@@ -2474,6 +2477,12 @@ def multipart_exit(file, id, action, parts=None):
 			UploadId=id,
 			MultipartUpload={"Parts": parts},
 		)
+		if max_size:
+			# Part URLs are not length-limited, so check what actually landed in the bucket.
+			size = s3_client.head_object(Bucket=bucket_name, Key=file)["ContentLength"]
+			if size > int(max_size):
+				s3_client.delete_object(Bucket=bucket_name, Key=file)
+				frappe.throw("Uploaded file is larger than allowed")
 	return response
 
 
